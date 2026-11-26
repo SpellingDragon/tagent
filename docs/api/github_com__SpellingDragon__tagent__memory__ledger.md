@@ -116,9 +116,12 @@ const DefaultSegmentMaxBytes int64 = 64 << 10
 
 VARIABLES
 
-var ErrArchiveConfig = errors.New("memory: archive_root and hot_log_max_bytes must be declared together with a valid archive_max_age")
-    ErrArchiveConfig reports a half or invalid archive declaration at the tier
-    boundary.
+var ErrArchiveConfig = errors.New("memory: invalid archive declaration: a write-rights open pairs archive_root with a positive hot_log_max_bytes, and archive_max_age never precedes archive_root nor goes negative")
+    ErrArchiveConfig reports a half or invalid archive declaration at the
+    tier boundary: a write-rights open pairs archive_root with a positive
+    hot_log_max_bytes, a view holding no write rights names archive_root alone
+    as the archive it reads, and archive_max_age never precedes archive_root nor
+    goes negative.
 
 var ErrArchiveCorrupt = errors.New("memory: archive manifest is not readable as one generation")
     ErrArchiveCorrupt reports an archive whose statement this build cannot read:
@@ -1125,10 +1128,14 @@ func OpenTier(ctx context.Context, cfg StorageConfig) (*Tier, error)
         each retention policy on the tier's original store, so a read of a
         reference outside its registered window is named expired; a policy the
         config leaves unregistered keeps its references readable indefinitely
-      - The archive face is declared whole or not at all: archive_root and
-        hot_log_max_bytes are set together, archive_max_age is never negative
-        and never declares a window beside no root, and a half or invalid
-        declaration is refused as ErrArchiveConfig before any store opens
+      - The archive face is declared whole or not at all on an open holding
+        write rights: archive_root and a positive hot_log_max_bytes are set
+        together, archive_max_age is never negative and never declares a
+        window beside no root, and a half or invalid declaration is refused as
+        ErrArchiveConfig before any store opens
+      - An open holding no write rights declares archive_root alone as the
+        archive it reads: it needs no budget because it never cuts or moves a
+        segment, and the writer's pairing gate above never relaxes for it
 
 func (t *Tier) Close() error
     Close ends this tier's view of its backend: the segment store completes its

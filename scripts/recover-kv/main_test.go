@@ -126,9 +126,10 @@ func TestRecoverKVVerifiesArchivedReferencesByIdentity(t *testing.T) {
 // and a hot root holding the reference beside the seat that names its partition.
 func archivedReferenceFixture(t *testing.T, ctx context.Context, key, content string, owner event.Address) (string, string) {
 	t.Helper()
-	sourceRoot := t.TempDir()
+	sourceRoot, archiveRoot := t.TempDir(), t.TempDir()
 	config := ledger.StorageConfig{Type: ledger.StorageJournal, Root: sourceRoot, WriteRights: true}
 	config.HotLogMaxBytes = archivedSegmentBudget
+	config.ArchiveRoot = archiveRoot
 	source, err := ledger.OpenTier(ctx, config)
 	if err != nil {
 		t.Fatalf("open the source root %s: %v", sourceRoot, err)
@@ -137,7 +138,6 @@ func archivedReferenceFixture(t *testing.T, ctx context.Context, key, content st
 	commitPairs(t, ctx, source, ledger.Pair{Key: "checkpoint:1:1", Value: []byte("cut")})
 	closeSeeded(t, source)
 
-	archiveRoot := t.TempDir()
 	archiveSealedInterval(t, sourceRoot, archiveRoot)
 
 	hot, hotRoot := seedRoot(t, ctx)
@@ -178,7 +178,17 @@ func archiveSealedInterval(t *testing.T, sourceRoot, archiveRoot string) {
 	indexBytes := copyArchiveFile(t, filepath.Join(segmentsDir, label+archiveSegmentIndexSuffix),
 		filepath.Join(target, label+archiveSegmentIndexSuffix))
 	header := archiveSegmentHeaderFixtureOf(t, segmentBytes)
-	keys := archiveSegmentIndexKeysOf(t, indexBytes)
+	keys, offsetOf := archiveSegmentIndexOf(t, indexBytes)
+	keySet, err := json.Marshal(keys)
+	if err != nil {
+		t.Fatalf("state the key set of %s: %v", label, err)
+	}
+	cutKey := "checkpoint:" + strconv.Itoa(header.CutPartition) + ":" + strconv.FormatInt(header.CutSeq, 10)
+	cutOffset, found := offsetOf[cutKey]
+	if !found {
+		t.Fatalf("the sealed interval %s states its cut at partition %d seq %d in no checkpoint key",
+			label, header.CutPartition, header.CutSeq)
+	}
 	manifest := archiveManifestFixture{
 		Version:    1,
 		Generation: 1,
@@ -188,11 +198,11 @@ func archiveSealedInterval(t *testing.T, sourceRoot, archiveRoot string) {
 				Partition: header.CutPartition,
 				FirstKey:  keys[0],
 				LastKey:   keys[len(keys)-1],
-				KeysSHA:   digestOf([]byte(strings.Join(keys, "\n"))),
+				KeysSHA:   digestOf(keySet),
 			},
 			Bytes:  int64(len(segmentBytes)),
 			SHA256: digestOf(segmentBytes),
-			Cut:    archiveCutFixture{Partition: header.CutPartition, Seq: header.CutSeq},
+			Cut:    archiveCutFixture{Partition: header.CutPartition, Seq: header.CutSeq, FrameOffset: cutOffset},
 			OffsetMap: archiveOffsetMapFixture{
 				FirstSeq:    header.FirstSeq,
 				LastSeq:     header.LastSeq,
@@ -256,26 +266,30 @@ func archiveSegmentHeaderFixtureOf(t *testing.T, raw []byte) archiveSegmentHeade
 	return header
 }
 
-// archiveSegmentIndexKeysOf answers the keys one framed segment index states, in key order.
-func archiveSegmentIndexKeysOf(t *testing.T, raw []byte) []string {
+// archiveSegmentIndexOf answers the keys one framed segment index states, in key
+// order, beside the byte each key's newest frame starts at.
+func archiveSegmentIndexOf(t *testing.T, raw []byte) ([]string, map[string]int64) {
 	t.Helper()
 	var index struct {
 		Entries []struct {
-			Key string `json:"key"`
+			Key    string `json:"key"`
+			Offset int64  `json:"offset"`
 		} `json:"entries"`
 	}
 	if err := json.Unmarshal(framedPayloadOf(t, raw), &index); err != nil {
 		t.Fatalf("decode the segment index: %v", err)
 	}
-	keys := make([]string, 0, len(index.Entries))
-	for _, entry := range index.Entries {
-		keys = append(keys, entry.Key)
-	}
-	if len(keys) == 0 {
+	if len(index.Entries) == 0 {
 		t.Fatalf("the segment index states no key")
 	}
+	keys := make([]string, 0, len(index.Entries))
+	offsetOf := make(map[string]int64, len(index.Entries))
+	for _, entry := range index.Entries {
+		keys = append(keys, entry.Key)
+		offsetOf[entry.Key] = entry.Offset
+	}
 	sort.Strings(keys)
-	return keys
+	return keys, offsetOf
 }
 
 // framedPayloadOf answers the JSON payload one framed file carries at its front.

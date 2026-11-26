@@ -150,7 +150,7 @@
 <a id="local-file-kv"></a>
 ## 六、kv 层：追加日志与原子存储缝
 
-`localfile`（现名 `journal`）档的 KV 是**一份追加日志**（`journal.go`）：只追加、不改写，不是分片快照，也不是每片一文件；**只有同时声明 `archive_root` 与正 `hot_log_max_bytes` 的视图才在检查点提交上封段**（`Commit` 的 cut 分支），未声明归档的视图一封不封、也不搬迁，日志就是一条开段；有预算时，一次 cut 之后的区间以**封段**（`segments/seg-<id>.log`，见[§五](#file-segment-store)）留在热目录，装得下的最近若干封段与开段继续热，装不下时按由旧到新的前缀搬进归档（`archive_max_age` 只加一条年龄条件、不单独触发搬迁；段头版本 1 的段不陈述提交时间范围，年龄窗口为正时一律保留）。热卷上界取两个数的较大者（`observeHotBudgetLocked`）：**声明窗口** `configured = hot_log_max_bytes + 2×当前热段最大日志区间`（取当前热卷内已封区间的最大字节数，一个还没有时为 0；2× 留出「最新封段＋开段」两段开销），**结构下限** `H`＝`journal.log`＋`order.log`＋`slots`＋`order.line`＋最新封段与其段索引（H 按当前热文件实测：收缩后的 `journal.log` 装着最新封段与开段的字节，属不可回收量；未收缩的日志会把仍可搬走的旧区间也算进 H，故 H 在收缩收敛后才是真正下限）；`effective = max(configured, H)`。**C1 口径**：`HotLogCutRequested()` 只在热字节超 `effective` 时置位——被下限压住、部署够不到的窗口不驱早切，切点节奏仍归部署；`HotLogOverBudget()` 是当前连续超预算区间的存在性（**取值 0/1**，不是累计次数），在「热字节超 `effective`」**或**「`configured < H`」时保持 1，一次封段不清零（封段不是已解决的窗口），安静点长期不可达时容忍超界、区间保持 1，只有一次观测到热字节不超有效上限且 `configured ≥ H` 才归零；该读数由 `noteCheckpointCommit` 在区间开始时去重输出 `hot log remains over its effective byte limit` WARN，归零后下一次区间可再告警。
+`localfile`（现名 `journal`）档的 KV 是**一份追加日志**（`journal.go`）：只追加、不改写，不是分片快照，也不是每片一文件；**只有声明写权（`WriteRights=true`）且同时声明 `archive_root` 与正 `hot_log_max_bytes` 的视图才在检查点提交上封段**（`Commit` 的 cut 分支）；只读视图可只声明 `archive_root` 作为归档读源、不声明热预算，封段、搬迁与写入一概不发生；未声明归档的视图一封不封、也不搬迁，日志就是一条开段；有预算时，一次 cut 之后的区间以**封段**（`segments/seg-<id>.log`，见[§五](#file-segment-store)）留在热目录，装得下的最近若干封段与开段继续热，装不下时按由旧到新的前缀搬进归档（`archive_max_age` 只加一条年龄条件、不单独触发搬迁；段头版本 1 的段不陈述提交时间范围，年龄窗口为正时一律保留）。热卷上界取两个数的较大者（`observeHotBudgetLocked`）：**声明窗口** `configured = hot_log_max_bytes + 2×当前热段最大日志区间`（取当前热卷内已封区间的最大字节数，一个还没有时为 0；2× 留出「最新封段＋开段」两段开销），**结构下限** `H`＝`journal.log`＋`order.log`＋`slots`＋`order.line`＋最新封段与其段索引（H 按当前热文件实测：收缩后的 `journal.log` 装着最新封段与开段的字节，属不可回收量；未收缩的日志会把仍可搬走的旧区间也算进 H，故 H 在收缩收敛后才是真正下限）；`effective = max(configured, H)`。**C1 口径**：`HotLogCutRequested()` 只在热字节超 `effective` 时置位——被下限压住、部署够不到的窗口不驱早切，切点节奏仍归部署；`HotLogOverBudget()` 是当前连续超预算区间的存在性（**取值 0/1**，不是累计次数），在「热字节超 `effective`」**或**「`configured < H`」时保持 1，一次封段不清零（封段不是已解决的窗口），安静点长期不可达时容忍超界、区间保持 1，只有一次观测到热字节不超有效上限且 `configured ≥ H` 才归零；该读数由 `noteCheckpointCommit` 在区间开始时去重输出 `hot log remains over its effective byte limit` WARN，归零后下一次区间可再告警。
 
 | 语义 | 规则 | 判据 |
 |---|---|---|
@@ -167,7 +167,7 @@
 <a id="store-instance-sharing"></a>
 ## 七、打开与实例共享
 
-`OpenTier(ctx, StorageConfig)`（`memory/ledger/config.go:314`）是唯一的打开入口，返回**同一后端的原文仓与段存储**：
+`OpenTier(ctx, StorageConfig)`（`memory/ledger/config.go:321`）是唯一的打开入口，返回**同一后端的原文仓与段存储**：
 
 | 档 | 后端 | 得到的两个 store | 能力声明 |
 |---|---|---|---|
@@ -176,7 +176,7 @@
 | `file` | rustviking CLI（默认 `rustviking`，配置默认 `<Root>/config.toml`） | `newRustVikingKV` 之上的同一对 store | `Durable=true` |
 
 **共享语义（与旧页相反，按当前码面）**：`OpenTier` **没有单例注册表**，共享的是**后端里的那份事实**而不是 Go 对象；两次开档只重放**上次索引所陈述水位以来的窗口**（不读值），值在真正读到时才从帧里取回。**一根一写者由引擎自己保证**：`StorageConfig.WriteRights` 持有 root 的 flock，第二次写权开档以 `ErrRootWriteLocked` 拒绝；只读视图不开写锁、不维护派生索引。
-- **归档声明在公共入口成对校验**：`OpenTier` 要求 `archive_root` 与正 `hot_log_max_bytes` 同时声明，`archive_max_age` 不得为负且不能脱离归档根；半声明或负值以 `ErrArchiveConfig` 拒绝，未声明归档的视图不封段、不搬迁。热路径的两个 store 只是**同一个 `AtomicStore` 上的两个视图**，谁提交谁就带上自己那一次屏障。
+- **归档声明在公共入口按写权分档校验**：`OpenTier` 要求声明写权的打开把 `archive_root` 与正 `hot_log_max_bytes` 成对声明，`archive_max_age` 不得为负且不能脱离归档根；不声明写权的只读视图可只声明 `archive_root` 作为归档读源（不声明热预算，不封段、不搬迁、不写任一字节），写者门不因此放宽；其余半声明或负值以 `ErrArchiveConfig` 拒绝，未声明归档的视图不封段、不搬迁。热路径的两个 store 只是**同一个 `AtomicStore` 上的两个视图**，谁提交谁就带上自己那一次屏障。
 
 <a id="read-paths"></a>
 ## 八、读路径
@@ -244,7 +244,7 @@
 
 | 缺口 | 现状与防线 | 候选方向 |
 |---|---|---|
-| **热卷只在声明归档时有界，归档侧无回收** | 声明了 `archive_root` 与 `hot_log_max_bytes` 时，热字节的目标上界是 `max(configured, H)`（口径见[§六](#local-file-kv)），超出的旧封段经归档搬走，且搬迁在同一次提交里跟在封段之后（安静点不可达时区间保持非零，`TestQuietPointUnreachableToleratesOverBudget`）；**未声明这两个键（默认形态）时热卷仍随历史增长**，MUST NOT 把有界说成无条件。热卷侧只有前端剪切（`cutJournalFront`），归档目录只增不减：没有归档回收或重写，manifest 世代与段文件都永久保留。**索引回放只读上次索引所陈述水位以来的窗口**（停稳根该窗口实测 0 字节），**开档的完整性校验有界于热窗**：热日志（仍在本地的封段＋开段）逐帧校验，封段另按段头与 stat 字节数核对结构，稳态归档段开档不预扫、其 digest 与索引在首次读到该段时校验；崩溃残留仍有热副本或待收缩前缀时，删除最后良好副本前只对对应本代段／索引补验摘要（`TestBootConvergesArchiveWithoutPrescan`、`TestBootArchiveConvergenceRefusesToDeleteHotCopyBehindCorruptArchive`、`TestBootArchiveConvergenceRefusesToShrinkLogBehindCorruptArchive`）；未声明归档时热窗就是整条日志，开档校验随日志增长（`TestOpenIntegrityScanIsTheWholeLogAndGrowsWithIt`），`JournalBytesOpen` 只报索引窗口那个量；`HotLogOverBudget()` 的生产告警已由 `noteCheckpointCommit` 按连续区间去重接线 | 归档侧的保留策略与回收（当前无）；未声明归档时的热卷有界化（当前无）；压实（把仍持有的键重写成新日志再原子换入，当前无） |
+| **热卷只在声明归档时有界，归档侧无回收** | 声明写权且声明了 `archive_root` 与正 `hot_log_max_bytes` 时，热字节的目标上界是 `max(configured, H)`（口径见[§六](#local-file-kv)），超出的旧封段经归档搬走，且搬迁在同一次提交里跟在封段之后（安静点不可达时区间保持非零，`TestQuietPointUnreachableToleratesOverBudget`）；**未声明这两个键（默认形态）时热卷仍随历史增长**，MUST NOT 把有界说成无条件。热卷侧只有前端剪切（`cutJournalFront`），归档目录只增不减：没有归档回收或重写，manifest 世代与段文件都永久保留。**索引回放只读上次索引所陈述水位以来的窗口**（停稳根该窗口实测 0 字节），**开档的完整性校验有界于热窗**：热日志（仍在本地的封段＋开段）逐帧校验，封段另按段头与 stat 字节数核对结构，稳态归档段开档不预扫、其 digest 与索引在首次读到该段时校验；崩溃残留仍有热副本或待收缩前缀时，删除最后良好副本前只对对应本代段／索引补验摘要（`TestBootConvergesArchiveWithoutPrescan`、`TestBootArchiveConvergenceRefusesToDeleteHotCopyBehindCorruptArchive`、`TestBootArchiveConvergenceRefusesToShrinkLogBehindCorruptArchive`）；未声明归档时热窗就是整条日志，开档校验随日志增长（`TestOpenIntegrityScanIsTheWholeLogAndGrowsWithIt`），`JournalBytesOpen` 只报索引窗口那个量；`HotLogOverBudget()` 的生产告警已由 `noteCheckpointCommit` 按连续区间去重接线 | 归档侧的保留策略与回收（当前无）；未声明归档时的热卷有界化（当前无）；压实（把仍持有的键重写成新日志再原子换入，当前无） |
 | **原文仓无回收面：过期只判不删，孤儿无清扫** | 召回窗口经 `StorageConfig.RetentionWindows` 由 `OpenTier` 注册进原文仓，窗口外的读取具名 `RecallExpired`／`ErrOriginalExpired`，`retention_policy` 提交值只有 `keep`，原文随链存续；事实经 `ledger.CommitFact` 一次批同写 ref 与事件族，正文只在事件体里，「正文已落而段未落」的中间态不存在（`segment_store.go:756-762`），但**无事件可承载的 `Originals.Put`** 失败即留无人引用的 ref/blob | 无 TTL 与回收执行器（三器零调用且销毁路径违「已提交事实不销毁」，留/删已裁为删），不再引入过期执行器；孤儿清扫的候选是「其余原文写入点收进同批」或「以链为真源的清扫器」（当前无）；接线前不得声称"按策略过期" |
 | **`file` 档批次无原子性** | 一次 CLI 调用一个键；中途失败留半批 | 依赖顺序不变量与重试幂等；或在 CLI 侧提供批量原子命令 |
 | **检索向量腿按需计算** | 装配面传 `nil` 嵌入器即纯关键词；有嵌入器时查询候选项现算；`vector_only` 无消费者 | 不保留运行期向量表或持久索引 |

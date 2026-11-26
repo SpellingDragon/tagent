@@ -64,7 +64,7 @@
 
 ### Requirement: 配置门、结构下限与回退契约 [C6]
 
-开启归档 SHALL 只由受校验的声明字段控制：`archive_root`、`hot_log_max_bytes`、可选 `archive_max_age`。严格解码 SHALL 拒绝未知键与非法值；半声明 SHALL 按名拒绝；公共 `OpenTier` 入口 SHALL 以 `ErrArchiveConfig` 拒绝半声明、负预算与负 age；三字段 SHALL 属重启档，改值须重启，热更 SHALL 按名拒绝。在受校验的部署声明面，未声明 `archive_root` 即未声明保留窗（半声明按名拒绝），此时行为 SHALL 与现状一致：只有一个未封段，MUST NOT 轮转、封段、搬迁或删除任何字节，根下 MUST NOT 新增归档制品。
+开启归档 SHALL 只由受校验的声明字段控制：`archive_root`、`hot_log_max_bytes`、可选 `archive_max_age`。严格解码 SHALL 拒绝未知键与非法值；半声明 SHALL 按名拒绝。声明面 SHALL 按写权区分两种视图：声明写权的打开（含装配启动的唯一写者）开启归档 SHALL 声明 `archive_root` 与正 `hot_log_max_bytes` 两件；不声明写权的只读视图 SHALL 可只声明 `archive_root` 作为归档读源、不声明热预算，该形态 MUST NOT 封段、搬迁或写入任一字节，MUST NOT 放宽写者门。公共 `OpenTier` 入口 SHALL 以 `ErrArchiveConfig` 拒绝：无 `archive_root` 而声明非零预算、声明写权而 `archive_root` 旁预算不为正、无 `archive_root` 而声明 `archive_max_age`、负预算与负 age。三字段 SHALL 属重启档，改值须重启，热更 SHALL 按名拒绝。在受校验的部署声明面，未声明 `archive_root` 即未声明保留窗（半声明按名拒绝），此时行为 SHALL 与现状一致：只有一个未封段，MUST NOT 轮转、封段、搬迁或删除任何字节，根下 MUST NOT 新增归档制品。
 
 回退契约 SHALL 区分两种根形态。从未归档的根：回退构建 SHALL 零新增，行为与基线一致。已归档的根：回退 SHALL 保留归档声明，由继续携带该声明的构建服务归档键；移除声明后归档键按身份读不可得，该形态 MUST NOT 被支持为静默回退，回退 SHALL 走离线折回或前向修复，并如实记作运维前置。`configured`（定义见 [C1]）低于恒热结构下限 `H` 时 SHALL 以结构下限为生效上限，该部署 MUST NOT 宣称 [C1]。
 
@@ -80,11 +80,11 @@
 - **THEN** 归档键 SHALL 读不到，该形态 SHALL 判为不支持的回退（`TestArchivedRootWithoutDeclarationDoesNotServeArchivedKeys`）
 - **AND** 受支持的回退 SHALL 是「保留归档声明、只回退代码」或「离线折回／前向修复」，MUST NOT 记作零迁移
 
-#### Scenario: 半声明与位置约束
+#### Scenario: 半声明、只读归档根与位置约束
 
-- **WHEN** 三字段只声明一部分，或声明落在 `agents.<id>.memory` 之外
-- **THEN** 装配 SHALL 按名拒绝，MUST NOT 静默补齐或落到顶层存储（`TestMemoryDeclarationRefusesHalfAnArchiveConfig`、`TestArchiveConfigOnlyUnderAgentMemory`）
-- **AND** 改归档字段 SHALL 按重启档拒绝热更（`TestMovedArchiveFieldIsNotTheSameTier`）
+- **WHEN** 三字段只声明一部分，或声明落在 `agents.<id>.memory` 之外，或不声明写权的只读视图只声明 `archive_root`
+- **THEN** 装配 SHALL 按名拒绝前两种，MUST NOT 静默补齐或落到顶层存储（`TestMemoryDeclarationRefusesHalfAnArchiveConfig`、`TestArchiveConfigOnlyUnderAgentMemory`）；公共 `OpenTier` SHALL 开具只读视图，并经归档根读回热日志不陈述的键（`TestOpenTierReadOnlyViewDeclaresArchiveRootAlone`）
+- **AND** 改归档字段 SHALL 按重启档拒绝热更（`TestMovedArchiveFieldIsNotTheSameTier`），写者门 MUST NOT 因只读形态放宽（`TestOpenTierRefusesHalfArchiveConfig`）
 
 ### Requirement: 成本读数分离与开档口径 [C4]
 

@@ -79,11 +79,13 @@ type archiveOptions struct {
 	// ArchiveRoot is the directory the archived segments live under, or is empty
 	// for no archive. It is a second directory beside Root and never the same
 	// name: the hot log stays bounded by Root's own volume, so merging the two
-	// would bound a directory instead of the deployment.
+	// would bound a directory instead of the deployment. A view holding no write
+	// rights names it alone as the archive it reads and declares no budget.
 	ArchiveRoot string
 	// HotLogMaxBytes is the byte budget the hot log is held to, or is zero for
 	// no budget. Cutting and archiving both need it above zero beside a set
-	// ArchiveRoot.
+	// ArchiveRoot, and an open holding write rights refuses that root without
+	// it; a view holding none reads the archive and declares no budget.
 	HotLogMaxBytes int
 	// ArchiveMaxAge is the window a segment's commits must all precede before
 	// it may move to the archive, or is zero for no window.
@@ -144,8 +146,12 @@ var ErrUnknownTier = errors.New("memory: unknown storage tier")
 // persists under.
 var ErrRootRequired = errors.New("memory: persistent tiers require a root directory")
 
-// ErrArchiveConfig reports a half or invalid archive declaration at the tier boundary.
-var ErrArchiveConfig = errors.New("memory: archive_root and hot_log_max_bytes must be declared together with a valid archive_max_age")
+// ErrArchiveConfig reports a half or invalid archive declaration at the tier
+// boundary: a write-rights open pairs archive_root with a positive
+// hot_log_max_bytes, a view holding no write rights names archive_root alone as
+// the archive it reads, and archive_max_age never precedes archive_root nor goes
+// negative.
+var ErrArchiveConfig = errors.New("memory: invalid archive declaration: a write-rights open pairs archive_root with a positive hot_log_max_bytes, and archive_max_age never precedes archive_root nor goes negative")
 
 // ErrJournalLegacyLayout reports a data directory that holds the retired
 // sharded-snapshot layout instead of a journal, so the caller is told to open a
@@ -308,15 +314,18 @@ func OpenAtomicStore(ctx context.Context, cfg StorageConfig) (AtomicStore, error
 //   - This open hands the declaration through unchanged, so a caller that commits to the root declares the rights and every other caller holds none: a component view opens beside the live writer, a commit carrying keys through it is refused as ErrCommitWithoutWriteRights, and Close gives the root up to the next writer
 //   - The kernel holds the lock, so it drops when the holding process exits; no recovery pass clears a stale lock, and durability never depended on the lock, because the barrier is the log's own sync
 //   - The config's RetentionWindows register the original-recall window of each retention policy on the tier's original store, so a read of a reference outside its registered window is named expired; a policy the config leaves unregistered keeps its references readable indefinitely
-//   - The archive face is declared whole or not at all: archive_root and hot_log_max_bytes are set together, archive_max_age is never negative and never declares a window beside no root, and a half or invalid declaration is refused as ErrArchiveConfig before any store opens
+//   - The archive face is declared whole or not at all on an open holding write rights: archive_root and a positive hot_log_max_bytes are set together, archive_max_age is never negative and never declares a window beside no root, and a half or invalid declaration is refused as ErrArchiveConfig before any store opens
+//   - An open holding no write rights declares archive_root alone as the archive it reads: it needs no budget because it never cuts or moves a segment, and the writer's pairing gate above never relaxes for it
 //
 // 契约: docs/wiki/memory/memory-architecture.md#store-instance-sharing
 func OpenTier(ctx context.Context, cfg StorageConfig) (*Tier, error) {
 	switch {
+	case cfg.HotLogMaxBytes < 0:
+		return nil, fmt.Errorf("%w: hot_log_max_bytes is never negative", ErrArchiveConfig)
 	case cfg.ArchiveRoot == "" && cfg.HotLogMaxBytes != 0:
 		return nil, fmt.Errorf("%w: hot_log_max_bytes requires archive_root", ErrArchiveConfig)
-	case cfg.ArchiveRoot != "" && cfg.HotLogMaxBytes <= 0:
-		return nil, fmt.Errorf("%w: archive_root requires hot_log_max_bytes above zero", ErrArchiveConfig)
+	case cfg.ArchiveRoot != "" && cfg.HotLogMaxBytes <= 0 && cfg.WriteRights:
+		return nil, fmt.Errorf("%w: a write-rights open declaring archive_root requires hot_log_max_bytes above zero", ErrArchiveConfig)
 	case cfg.ArchiveRoot == "" && cfg.ArchiveMaxAge != 0:
 		return nil, fmt.Errorf("%w: archive_max_age requires archive_root", ErrArchiveConfig)
 	case cfg.ArchiveMaxAge < 0:
