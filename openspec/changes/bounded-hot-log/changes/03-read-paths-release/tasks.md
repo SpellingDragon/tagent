@@ -1,4 +1,0 @@
-# Tasks · 03
-
-- [ ] 03.301 消费面跨档一致性 —— 写面：`tool/recall/*`、`memory/query/*`、`features/rl/*`（导出读）＋测试。—— 验证：正锚＝`TestRecallGetCrossesArchive`（老键经归档读回原字节）、`TestRecallTraceReportsArchiveMissing`（具名拒）、`TestExportReadsArchivedFactsByIdentity`；负锚＝归档改字节后热读不服务旧副本（禁复制正文入热缓存，代码核查＋锚）；消费者锚＝真实工具入口与导出入口。
-- [ ] 03.302 有界锚与回退零差异 —— 写面：`assembly`/`tests/integration` 测试＋证据；S1 锚先于实现存在并红（基线树红证入档）。—— 验证：正锚＝`TestHotLogPlateausAcrossGenerationsAndOldFactsStayReadable`（多代平台；回滚即红；同锚断言最新 cut 段＋开段恒热、热段数＝成功 cut 数、正常负载 `hot_over_budget` 为零、开档校验字节有界于热窗）＋`TestQuietPointUnreachableToleratesOverBudget`（故障注入：超界容忍、不封段、观测计数非零——与 S1 成对钉死条件语义）；负锚＝`TestCorruptArchiveIsNamedNotAbsent`、`TestMissingArchiveIsNamedNotAbsent`、`TestHottestSegmentNeverArchived`；消费者锚＝`TestCheckpointSliceReadsArchivedBodyByIdentity`（dump 引用已归档正文经定位读）；无归档配置零差异探针；热字节/归档字节/跨档延迟三类读数＋开档恢复成本（校验字节/耗时、索引重建量，对比 01.101 基线）入证据。

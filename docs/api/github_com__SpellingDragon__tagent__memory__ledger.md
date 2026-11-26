@@ -1,5 +1,30 @@
 package ledger // import "github.com/SpellingDragon/tagent/memory/ledger"
 
+The archive of a journal root holds the sealed segments a cut has closed
+behind it, stated by one manifest generation: the segments it carries,
+the key domain each one answers, its own byte count and digest, the cut its
+boundary closed at and the offset map that locates a key inside it. The manifest
+is the only statement of which segments live in the archive; the segments
+themselves stay self-describing, and a segment or index a statement misses is
+copied again rather than guessed at. A move follows one order — stage the copies
+and their barriers, state the generation that names them with their digests,
+give the staged copies those names, delete the hot copies — so a named segment
+or index file stands only behind the generation that states it, and every stop
+in the move is recovered by reading the manifest back: the names it states are
+finished, and the staged files no statement names are removed. A root holding a
+named file beside no manifest is therefore corrupt rather than empty.
+
+A journal view that declares an archive root answers a key its hot index does
+not state from the segments the archive manifest carries: the manifest's key
+domain picks the segments the key may live in, the segment index names the frame
+that carries it, and that frame is read and verified where the segment holds it.
+The answers stay apart — a key no statement carries, a stated key whose bytes
+are absent, and bytes that fail their digest — because an archive that cannot
+be read is a storage fault and never a fact that does not exist. An enumeration
+reads the same statements in the order they were committed: a listing reads the
+indexes, and a walk reads the frames of the segments it reaches and none behind
+its stop.
+
 The one atomic storage seam a tier opens: engines implement it, the segment and
 original stores read and commit through it, and a caller injects failures by
 wrapping it. No caller names an engine's file layout, so switching engines needs
@@ -15,6 +40,14 @@ side. Its files sit under the ledger unit by the mechanism-subpackage rule of
 CONTRIBUTING.md: the fact vocabulary (OriginalRef, Integrity), the read face
 (the stores, RecallResult) and the per-tier strategies (localfile, rustviking).
 
+The hot directory of one journal holds the intervals its cuts closed behind the
+open segment. A move copies the oldest of them into the archive and states them
+in one manifest generation; the hot files then shrink to the intervals that
+generation leaves behind, so the log loses the copied bytes and the index states
+the keys of the bytes that remain. The manifest is the only statement of which
+intervals left, so a hot directory it does not account for is refused by name
+instead of rewritten.
+
 The journal is the localfile tier's persistent unit: one append-only file of
 frames, each carrying the length of its payload and a CRC32C of that payload.
 A frame that is fully present and matches its checksum is a committed record.
@@ -28,6 +61,16 @@ journal. A commit appends one record, completes the log's barrier over it and
 only then publishes its values to the resident set, so a successful return means
 the record is durable and a commit whose write or barrier failed leaves the view
 answering exactly the records the file holds.
+
+A journal directory holds its open segment in journal.log and every interval a
+cut has closed behind it in segments/seg-<id>.log. A sealed segment is the bytes
+of one interval, copied verbatim behind a header that states the interval it
+carries: the segment id, the commit ranks it spans, the cut it was closed at and
+its own byte count. Offsets of the log are logical and never move when a segment
+closes: the sealed segments and the open segment are one address space read as
+one file, so an index that locates a value keeps locating it across a boundary
+and a boot replays the sealed segments in id order followed by the open segment
+exactly as it replayed one file.
 
 The original store every durable engine keeps: the reference and independent
 body model of the in-memory tier, committed through the atomic store seam so it
@@ -72,6 +115,25 @@ const DefaultSegmentMaxBytes int64 = 64 << 10
     instead of reading an original whole.
 
 VARIABLES
+
+var ErrArchiveConfig = errors.New("memory: invalid archive declaration: a write-rights open pairs archive_root with a positive hot_log_max_bytes, and archive_max_age never precedes archive_root nor goes negative")
+    ErrArchiveConfig reports a half or invalid archive declaration at the
+    tier boundary: a write-rights open pairs archive_root with a positive
+    hot_log_max_bytes, a view holding no write rights names archive_root alone
+    as the archive it reads, and archive_max_age never precedes archive_root nor
+    goes negative.
+
+var ErrArchiveCorrupt = errors.New("memory: archive manifest is not readable as one generation")
+    ErrArchiveCorrupt reports an archive whose statement this build cannot read:
+    a manifest file present without one generation it can decode, two slots
+    stating one generation in different words, a stated segment whose bytes
+    or digest do not match the statement, or a key domain the segments do not
+    answer. The statement itself is damaged, so no read is served from a guess.
+
+var ErrArchiveMissing = errors.New("memory: a segment the archive manifest states is absent")
+    ErrArchiveMissing reports a segment the manifest states whose bytes are
+    absent: the authority names an interval the archive does not hold, which is
+    never read as the empty archive a root without any manifest states.
 
 var ErrBatchNotAtomic = errors.New("memory: this engine lands one key per call and cannot commit a batch whole")
     ErrBatchNotAtomic reports a commit of a batch carrying several keys
@@ -125,7 +187,7 @@ var ErrJournalBarrier = errors.New("memory: journal barrier failed")
 
 var ErrJournalCorrupt = errors.New("memory: journal frame is corrupt")
     ErrJournalCorrupt reports a frame that is fully present in the log and does
-    not match the checksum written beside it.
+    not match its checksum, or declares a payload past the frame bound.
 
 var ErrJournalFormat = errors.New("memory: journal format version is not supported")
     ErrJournalFormat reports a log written under a format version this build
@@ -141,6 +203,11 @@ var ErrJournalLegacyLayout = errors.New("memory: data directory holds the retire
     ErrJournalLegacyLayout reports a data directory that holds the retired
     sharded-snapshot layout instead of a journal, so the caller is told to open
     a new directory rather than being handed a half-read store.
+
+var ErrJournalMaintenanceFailed = errors.New("memory: journal maintenance failed; close and reopen the storage tier")
+    ErrJournalMaintenanceFailed reports a journal view whose hot-log maintenance
+    could not be recovered. The view refuses further work until Close releases
+    the root and the storage tier is opened again.
 
 var ErrKeyRequired = errors.New("memory: original reference carries no key")
     ErrKeyRequired reports a commit that carries no key, so no read could ever
@@ -208,6 +275,22 @@ var ErrSegmentBodyMissing = errors.New("memory: committed event body is missing"
     body cannot be read: the read names the failure instead of publishing the
     event as an absent one.
 
+var ErrSegmentHeader = errors.New("memory: journal segment header is not readable")
+    ErrSegmentHeader reports a sealed segment whose header this build cannot
+    read: a file shorter than a header frame, a frame whose checksum does not
+    cover the header it holds, a segment id this build does not state, or a byte
+    count the file beside the header does not carry. The header is the segment's
+    own statement of the interval it holds, so a segment whose statement is
+    unreadable is refused by name instead of served as the bytes of an interval
+    nobody stated.
+
+var ErrSegmentIndexUnrebuildable = errors.New("memory: sealed segment index cannot be rebuilt")
+    ErrSegmentIndexUnrebuildable reports a segment whose keys this build cannot
+    index: the segment states no header this build reads, holds bytes its header
+    does not cover, or carries a frame no checksum verifies, so the index stated
+    from it would name bytes nobody stated. The refusal is by name because an
+    empty index would answer every key the segment carries as absent.
+
 var ErrSegmentLimit = errors.New("memory: segment request carries a negative byte limit")
     ErrSegmentLimit reports a segment request carrying a negative byte limit,
     so no bounded segment could answer it.
@@ -227,6 +310,12 @@ var ErrSegmentPosition = errors.New("memory: segment record carries a negative w
 var ErrSegmentRange = errors.New("memory: segment must start at line 1 or later and read at least one line")
     ErrSegmentRange reports a segment request that starts before the first line
     or asks for no lines at all.
+
+var ErrSegmentSealAfterClose = errors.New("memory: seal a segment of a closed view")
+    ErrSegmentSealAfterClose reports a seal asked of a view whose Close ended
+    it: the segment it would state belongs to no writer of the root, so the call
+    is refused by name instead of writing beside the process that took the root
+    over.
 
 var ErrSnapshotCorrupt = errors.New("memory: stored record is corrupt")
     ErrSnapshotCorrupt reports stored content that cannot be read back as the
@@ -447,24 +536,16 @@ func (s *FileSegmentStore) EachIndexNewestFirst(ctx context.Context, visit func(
         on it.
 
 func (s *FileSegmentStore) EachIndexNewestFirstFrom(ctx context.Context, from event.EventID, visit func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) (bool, error)) error
-    EachIndexNewestFirstFrom streams the index from the entry of one key onwards
-    in the order EachIndexNewestFirstUntil states.
-      - a caller that already knows the key it is looking for pays its own
-        commit and the ones behind it instead of every commit filed after it
-      - the walk starts where the engine's order-line index states the commit
-        that last stated the key ended, which costs one probe of the identity
-        index and one read of that index
-      - so the walk costs the history committed after the key nothing
-      - the seek is answered only once the walk names the key it was read for,
-        because one order line states every key of its commit: a walk that ends
-        without naming that key discards the seek and walks the index from the
-        newest entry, so a word stating some other byte costs the walk its seek
-        and never its answer
-      - an engine that states no such index, a key this store holds no published
-        entry of, and an entry the engine names no commit for all walk the index
-        from the newest entry
-      - so a seek that cannot be placed costs the walk it always took and never
-        an entry it skipped
+    EachIndexNewestFirstFrom streams the full index from one key's commit.
+      - The seek costs the key's commit and older records, not commits filed
+        after it.
+      - An unplaceable seek falls back to the full newest-first walk.
+
+func (s *FileSegmentStore) EachIndexNewestFirstFromHot(ctx context.Context, from event.EventID, visit func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) (bool, error)) error
+    EachIndexNewestFirstFromHot streams only the hot index from one key's
+    commit.
+      - Point lookups keep their bounded hot walk before falling back to
+        identity reads.
 
 func (s *FileSegmentStore) EachIndexNewestFirstUntil(ctx context.Context, visit func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) (bool, error)) error
     EachIndexNewestFirstUntil streams the index in commit order, newest commit
@@ -923,12 +1004,7 @@ type StorageConfig struct {
 	Type StorageType
 	// Root is the directory the localfile and file tiers persist under.
 	Root string
-	// RustVikingBinary names or locates the rustviking executable; empty means
-	// "rustviking" looked up on PATH.
-	RustVikingBinary string
-	// RustVikingConfig is the config file passed to the rustviking CLI; empty
-	// means the config.toml under Root.
-	RustVikingConfig string
+
 	// Engine, when set, is the engine the tier opens over instead of the one Type
 	// names. It is the seam a caller wraps to observe, delay or fail commits: the
 	// wrapper implements the same AtomicStore, so the injection works over any
@@ -947,10 +1023,11 @@ type StorageConfig struct {
 	// registered window keeps its references readable indefinitely, and a window
 	// of zero or less reports every read of that policy as expired.
 	RetentionWindows map[string]time.Duration
+	// Has unexported fields.
 }
     StorageConfig locates one storage tier: the tier name, the root directory
-    the persistent tiers persist under, and the rustviking executable and config
-    the file tier drives.
+    the persistent tiers persist under, the archive face the segments move
+    under, and the rustviking executable and config the file tier drives.
 
 type StorageType string
     StorageType names one storage tier of the original and segment stores.
@@ -1051,6 +1128,14 @@ func OpenTier(ctx context.Context, cfg StorageConfig) (*Tier, error)
         each retention policy on the tier's original store, so a read of a
         reference outside its registered window is named expired; a policy the
         config leaves unregistered keeps its references readable indefinitely
+      - The archive face is declared whole or not at all on an open holding
+        write rights: archive_root and a positive hot_log_max_bytes are set
+        together, archive_max_age is never negative and never declares a
+        window beside no root, and a half or invalid declaration is refused as
+        ErrArchiveConfig before any store opens
+      - An open holding no write rights declares archive_root alone as the
+        archive it reads: it needs no budget because it never cuts or moves a
+        segment, and the writer's pairing gate above never relaxes for it
 
 func (t *Tier) Close() error
     Close ends this tier's view of its backend: the segment store completes its

@@ -1,0 +1,12 @@
+command: go test -overlay=/tmp/tagent-f3-C1/overlay.json ./assembly -count=1 -run '^(TestHotLogPlateausAcrossGenerationsAndOldFactsStayReadable|TestQuietPointUnreachableToleratesOverBudget)$' -v
+exit: 1
+    checkpoint_test.go:6376: the recovered cut requested=false over_budget=2, want no request and the resolved interval
+--- FAIL: TestQuietPointUnreachableToleratesOverBudget (0.37s)
+    checkpoint_test.go:7086: archive reason: over-budget: gen1 hot_over_budget=1, want zero
+    checkpoint_test.go:7086: archive reason: over-budget: gen2 hot_over_budget=2, want zero
+    checkpoint_test.go:7086: archive reason: over-budget: gen3 hot_over_budget=3, want zero
+    checkpoint_test.go:7086: archive reason: over-budget: gen4 hot_over_budget=4, want zero
+    checkpoint_test.go:7088: the archive workload does not satisfy the plateau criterion
+--- FAIL: TestHotLogPlateausAcrossGenerationsAndOldFactsStayReadable (1.90s)
+FAIL
+FAIL	github.com/SpellingDragon/tagent/assembly	2.817s

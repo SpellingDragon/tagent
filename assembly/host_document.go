@@ -1622,6 +1622,12 @@ func memoryRefusalOf(decl *config.Declaration, cause error) error {
 	return fmt.Errorf("%w: %s: %w", ErrHostReloadRestartRequired, memoryFieldPathOf(decl), cause)
 }
 
+// memoryFieldPath names the configuration field one agent's memory declaration
+// lives at, so a refusal sends an operator to the line to change.
+func memoryFieldPath(id string) string {
+	return "agents." + id + ".memory"
+}
+
 // memoryFieldPathOf reports the field path of the memory declaration a document
 // states, in agent name order.
 func memoryFieldPathOf(decl *config.Declaration) string {
@@ -1631,7 +1637,8 @@ func memoryFieldPathOf(decl *config.Declaration) string {
 	ids := make([]string, 0, len(decl.Agents))
 	for _, spec := range decl.Agents {
 		entry := spec.Memory
-		if strings.TrimSpace(entry.Type) != "" || strings.TrimSpace(entry.Path) != "" || declaresEngine(entry.Engine) {
+		if strings.TrimSpace(entry.Type) != "" || strings.TrimSpace(entry.Path) != "" || declaresEngine(entry.Engine) ||
+			strings.TrimSpace(entry.ArchiveRoot) != "" || entry.HotLogMaxBytes != 0 || entry.ArchiveMaxAge != 0 {
 			ids = append(ids, spec.ID)
 		}
 	}
@@ -1639,7 +1646,7 @@ func memoryFieldPathOf(decl *config.Declaration) string {
 	if len(ids) == 0 {
 		return "storage.root"
 	}
-	return "agents." + ids[0] + ".memory"
+	return memoryFieldPath(ids[0])
 }
 
 // sameMemoryTier reports whether one generation's merged declaration names the

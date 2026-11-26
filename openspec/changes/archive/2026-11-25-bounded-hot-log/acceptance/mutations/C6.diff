@@ -1,0 +1,11 @@
+--- a/memory/ledger/journal_kv.go
++++ b/memory/ledger/journal_kv.go
+@@ -582,7 +582,7 @@
+ 		k.resident.remove(key)
+ 	}
+ 	partition, seq, checkpoint := checkpointCutOf(batch)
+-	if k.hotLogMaxBytes > 0 && checkpoint {
++	if checkpoint {
+ 		if err := k.log.sealSegment(partition, seq); err != nil {
+ 			return fmt.Errorf("%w: tagent: the commit is on disk, but the log segment behind the checkpoint of partition %d at seq %d was not staked: %w", ErrCommitUncertain, partition, seq, err)
+ 		}

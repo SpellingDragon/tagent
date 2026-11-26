@@ -4,7 +4,7 @@
 
 执行核只做三件事：**把一次调用的事件读成一次决策、把这次决策的工具调用按任务受理、把关闭做成真实义务结清**。它自己不持状态——绑定、会话、任务与消费位置都在属主手里，执行核只借、只读、只交还。
 
-三个概念贯穿全篇（与 [storage-concept-map](../../demos/storage-concept-map.html) 同一套词汇）：**链**是身份与因果（轻、可恒重放）；**原文仓**是 blob 字节仓加 ref 引用账目；**账本**记任务迁移与消费回执；交付义务与结算则落链（见第四节）。通知消费账＝席位＋回执＋settle attempt，除此以外的读数一律现算。时间旅行演示见 [storage-time-travel](../../demos/storage-time-travel.html)。
+三个概念贯穿全篇（与 [storage-concept-map](../../demos/storage-concept-map.html) 同一套词汇）：**链**是身份与因果（轻、可恒重放）；**原文仓**是 ref 引用账目（正文只在事件体内，旧根另带 blob 副本）；**账本**记任务迁移与消费回执；交付义务与结算则落链（见第四节）。通知消费账＝席位＋回执＋settle attempt，除此以外的读数一律现算。时间旅行演示见 [storage-time-travel](../../demos/storage-time-travel.html)。
 
 <a id="module-position"></a>
 ## 一、模块定位：调度事件、做一次决策、按义务关闭

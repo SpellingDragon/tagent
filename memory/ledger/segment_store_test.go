@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
+	"trpc.group/trpc-go/trpc-agent-go/model"
 )
 
 // dropSegmentCache clears the read cache of one store, so a check exercises the
@@ -155,6 +156,235 @@ func TestSegmentGetEventColdMiss(t *testing.T) {
 		if !bytes.Equal(stored.Body, segmentBodyOf(rec, 256<<10)) {
 			t.Fatalf("cold GetEvent(%s) carries different bytes", rec.EventKey)
 		}
+	}
+}
+
+// TestArchiveReadsBypassResidentAndSegmentCaches pins archive bodies staying cold while hot bodies stay warm.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#file-segment-store
+func TestArchiveReadsBypassResidentAndSegmentCaches(t *testing.T) {
+	ctx := context.Background()
+	root, archiveRoot := t.TempDir(), t.TempDir()
+	cfg := StorageConfig{Type: StorageJournal, Root: root, WriteRights: true}
+	cfg.ArchiveRoot = archiveRoot
+	cfg.HotLogMaxBytes = 1
+	writer, err := OpenTier(ctx, cfg)
+	if err != nil {
+		t.Fatalf("open the archive-backed writer: %v", err)
+	}
+	t.Cleanup(func() { writer.Close() })
+	archived := segmentRecord(7, 1000, 1, "archived-event", 256)
+	hot := segmentRecord(7, 1001, 2, "hot-event", 256)
+	if err := writer.Segments.StoreEvent(ctx, archived); err != nil {
+		t.Fatalf("store the archived event: %v", err)
+	}
+	if err := writer.Store.Commit(ctx, Batch{Puts: []Pair{{Key: "checkpoint:7:1", Value: []byte("cut")}}}); err != nil {
+		t.Fatalf("commit the first checkpoint: %v", err)
+	}
+	if err := writer.Segments.StoreEvent(ctx, hot); err != nil {
+		t.Fatalf("store the hot event: %v", err)
+	}
+	if err := writer.Store.Commit(ctx, Batch{Puts: []Pair{{Key: "checkpoint:7:2", Value: []byte("cut")}}}); err != nil {
+		t.Fatalf("commit the second checkpoint: %v", err)
+	}
+	segments, err := filepath.Glob(filepath.Join(archiveRoot, journalSegmentDirName, "seg-*.log"))
+	if err != nil || len(segments) != 1 {
+		t.Fatalf("the archive segments = %v err=%v, want one moved interval", segments, err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close the archive writer: %v", err)
+	}
+	cfg.WriteRights = false
+	reader, err := OpenTier(ctx, cfg)
+	if err != nil {
+		t.Fatalf("reopen the archive reader: %v", err)
+	}
+	t.Cleanup(func() { reader.Close() })
+	kv, ok := reader.Store.(*journalKV)
+	if !ok {
+		t.Fatalf("the journal tier holds %T, want its journal view", reader.Store)
+	}
+	stored, held, err := reader.Segments.GetEvent(ctx, archived.EventKey)
+	if err != nil || !held || !bytes.Equal(stored.Body, archived.Body) {
+		t.Fatalf("the archived event read = (%t, %v), want its committed bytes", held, err)
+	}
+	archivedBodyKey := segmentBodyKey(indexPosition{partition: archived.PartitionID, window: archived.WindowTS, seq: archived.Seq})
+	kv.mu.Lock()
+	_, resident := kv.resident.get(archivedBodyKey)
+	kv.mu.Unlock()
+	reader.Segments.mu.Lock()
+	_, cached := reader.Segments.cache.get(archived.EventKey)
+	reader.Segments.mu.Unlock()
+	if resident || cached {
+		t.Fatalf("the archived body stayed warm: resident=%t segment-cache=%t", resident, cached)
+	}
+	stored, held, err = reader.Segments.GetEvent(ctx, hot.EventKey)
+	if err != nil || !held || !bytes.Equal(stored.Body, hot.Body) {
+		t.Fatalf("the hot event read = (%t, %v), want its committed bytes", held, err)
+	}
+	hotBodyKey := segmentBodyKey(indexPosition{partition: hot.PartitionID, window: hot.WindowTS, seq: hot.Seq})
+	kv.mu.Lock()
+	_, resident = kv.resident.get(hotBodyKey)
+	kv.mu.Unlock()
+	reader.Segments.mu.Lock()
+	_, cached = reader.Segments.cache.get(hot.EventKey)
+	reader.Segments.mu.Unlock()
+	if !resident || !cached {
+		t.Fatalf("the hot body did not stay warm: resident=%t segment-cache=%t", resident, cached)
+	}
+}
+
+// TestCheckpointSliceReadsArchivedBodyByIdentity restores a checkpoint reference after its original body leaves the hot log.
+//   - a real checkpoint slice names an original whose event and reference are sealed into the archive
+//   - OpenTier decodes the checkpoint and resolves the slice through the scoped original identity read
+//   - no blob key or hot segment copy holds the original, and the returned bytes equal the committed body
+func TestCheckpointSliceReadsArchivedBodyByIdentity(t *testing.T) {
+	ctx := context.Background()
+	root, archiveRoot := t.TempDir(), t.TempDir()
+	cfg := StorageConfig{Type: StorageJournal, Root: root, WriteRights: true}
+	cfg.ArchiveRoot = archiveRoot
+	cfg.HotLogMaxBytes = 1
+	writer, err := OpenTier(ctx, cfg)
+	if err != nil {
+		t.Fatalf("open the archive-backed writer: %v", err)
+	}
+	const partition = 7
+	owner := event.Address{AgentID: "checkpoint-agent", SessionID: "checkpoint-session"}
+	originalKey := event.EventID("checkpoint-original")
+	originalBody := []byte("first line\nsecond λ line\x00last\n")
+	originalRef := OriginalRef{
+		Key:             originalKey,
+		Owner:           owner,
+		Format:          "text/plain",
+		RetentionPolicy: "keep",
+		Integrity:       Integrity{Digest: digestOf(originalBody), Length: int64(len(originalBody))},
+	}
+	bodyOf := func(key event.EventID, typ string, content []byte) []byte {
+		t.Helper()
+		body, err := json.Marshal(struct {
+			Key     event.EventID `json:"key"`
+			Type    string        `json:"type"`
+			Message model.Message `json:"message"`
+		}{Key: key, Type: typ, Message: model.Message{Content: string(content)}})
+		if err != nil {
+			t.Fatalf("encode the body of %s: %v", key, err)
+		}
+		return body
+	}
+	commit := func(key event.EventID, typ string, seq, window int64, content []byte) {
+		t.Helper()
+		outcome, err := CommitFact(ctx, writer, FactCommit{
+			Record: SegmentRecord{
+				PartitionID: partition,
+				WindowTS:    window,
+				Seq:         seq,
+				EventKey:    key,
+				EventTime:   window,
+				Body:        bodyOf(key, typ, content),
+			}.WithChain(typ, ""),
+			Ref:  OriginalRef{Key: key, Owner: owner, Format: "text/plain", RetentionPolicy: "keep"},
+			Body: content,
+		})
+		if err != nil || outcome != FactCommitted {
+			t.Fatalf("commit %s = (%v, %v), want FactCommitted", key, outcome, err)
+		}
+	}
+	commit(originalKey, event.TypeExternalInput, 1, 1000, originalBody)
+	slicePayload, err := json.Marshal(originalRef)
+	if err != nil {
+		t.Fatalf("encode the checkpoint's original reference: %v", err)
+	}
+	commitCheckpoint := func(cut int64) event.EventID {
+		t.Helper()
+		checkpoint, err := event.CheckpointFor(event.CheckpointOffset{partition: cut}, []event.CheckpointSlice{{
+			Name:    "originals",
+			Payload: slicePayload,
+		}})
+		if err != nil {
+			t.Fatalf("render checkpoint cut %d: %v", cut, err)
+		}
+		checkpoint.Key = event.CheckpointKey(partition, cut)
+		payload, err := event.CheckpointPayloadOf(checkpoint)
+		if err != nil {
+			t.Fatalf("dump checkpoint cut %d: %v", cut, err)
+		}
+		key := event.EventID(checkpoint.Key)
+		commit(key, event.TypeCheckpoint, cut+1, 1000+cut, payload)
+		return key
+	}
+	commitCheckpoint(1)
+	commit(event.EventID("checkpoint-filler"), event.TypeExternalInput, 3, 1001, []byte("over budget"))
+	latestCheckpoint := commitCheckpoint(3)
+
+	manifest, found, err := readArchiveManifest(archiveRoot)
+	if err != nil || !found || len(manifest.Segments) != 1 || manifest.Segments[0].SegmentID != journalSegmentLabelOf(1) {
+		t.Fatalf("the archive manifest = found=%t segments=%+v err=%v, want only the original's first interval", found, manifest, err)
+	}
+	hotDir := filepath.Join(root, kvDirName)
+	hotSegments := readSealedSegmentsForTest(t, hotDir)
+	if len(hotSegments) != 1 || hotSegments[0].id != 2 {
+		t.Fatalf("the hot sealed intervals = %+v, want only the newest checkpoint interval", hotSegments)
+	}
+	archivePath := filepath.Join(archiveRoot, journalSegmentDirName, journalSegmentNameOf(1))
+	if _, err := os.Stat(archivePath); err != nil {
+		t.Fatalf("stat the archived original interval: %v", err)
+	}
+	hotPath := filepath.Join(hotDir, journalSegmentDirName, journalSegmentNameOf(1))
+	if _, err := os.Stat(hotPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the original's archived interval still has a hot copy: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close the archive writer: %v", err)
+	}
+
+	cfg.WriteRights = false
+	reader, err := OpenTier(ctx, cfg)
+	if err != nil {
+		t.Fatalf("reopen the archive reader: %v", err)
+	}
+	t.Cleanup(func() { reader.Close() })
+	checkpointKey, checkpointPartition, held, err := reader.Segments.NewestOfType(ctx, event.TypeCheckpoint)
+	if err != nil || !held || checkpointKey != latestCheckpoint || checkpointPartition != partition {
+		t.Fatalf("the newest checkpoint = (%s, %d, %t, %v), want %s in partition %d", checkpointKey, checkpointPartition, held, err, latestCheckpoint, partition)
+	}
+	stored, held, err := reader.Segments.GetEventInPartition(ctx, checkpointKey, checkpointPartition)
+	if err != nil || !held {
+		t.Fatalf("read the newest checkpoint = (held=%t, %v)", held, err)
+	}
+	var carried struct {
+		Key     event.EventID `json:"key"`
+		Type    string        `json:"type"`
+		Message model.Message `json:"message"`
+	}
+	if err := json.Unmarshal(stored.Body, &carried); err != nil {
+		t.Fatalf("decode the checkpoint body: %v", err)
+	}
+	checkpoint, stated := event.CheckpointOf(event.Event{Key: carried.Key, Type: carried.Type, Message: carried.Message})
+	if !stated || len(checkpoint.Slices) != 1 || checkpoint.Slices[0].Name != "originals" {
+		t.Fatalf("the stored checkpoint = stated=%t slices=%+v, want the one original-reference slice", stated, checkpoint.Slices)
+	}
+	var sliceRef OriginalRef
+	if err := json.Unmarshal(checkpoint.Slices[0].Payload, &sliceRef); err != nil {
+		t.Fatalf("decode the checkpoint's original reference: %v", err)
+	}
+	if sliceRef.Key != originalRef.Key || sliceRef.ReadScope() != originalRef.ReadScope() {
+		t.Fatalf("the checkpoint reference = %+v, want identity %s under %+v", sliceRef, originalRef.Key, originalRef.ReadScope())
+	}
+	blobPairs, err := reader.Store.Read(ctx, Fetch{Key: blobKVKey(originalKey)})
+	if err != nil || len(blobPairs) != 0 {
+		t.Fatalf("the original's blob entries = (%+v, %v), want no second body copy", blobPairs, err)
+	}
+	originals, held := reader.Originals.(*kvOriginalStore)
+	if !held {
+		t.Fatalf("the reopened tier holds originals %T, want the journal original store", reader.Originals)
+	}
+	recalled := originals.GetScoped(ctx, sliceRef.Key, sliceRef.ReadScope())
+	if recalled.Outcome != RecallFound || recalled.Err != nil || !bytes.Equal(recalled.Body, originalBody) {
+		t.Fatalf("the checkpoint's archived original = (%v, %v, %d bytes), want (%v, nil, %d bytes)", recalled.Outcome, recalled.Err, len(recalled.Body), RecallFound, len(originalBody))
+	}
+	loads, _, identityKeys := originals.OriginalsReads()
+	if loads != 0 || identityKeys != 2 {
+		t.Fatalf("the restored reference paid %d whole-family load(s) and %d identity key read(s), want zero loads and the blob/ref pair", loads, identityKeys)
 	}
 }
 
@@ -1457,6 +1687,17 @@ func factProbeRoot(t *testing.T, ctx context.Context, root string, probe *factPr
 // factProbeWindow is the window every fact of these fixtures is placed in.
 const factProbeWindow = 1700000000000
 
+// factProbeEventBody answers the event body of one probe fact: the body shape a
+// fact commit lands, carrying the original text as the content of its message, so
+// a read of the original answers the bytes the same commit named.
+func factProbeEventBody(content []byte) []byte {
+	quoted, err := json.Marshal(string(content))
+	if err != nil {
+		panic(err)
+	}
+	return append(append([]byte(`{"message":{"content":`), quoted...), "}}"...)
+}
+
 // factProbeFact names one fact of partition 1 at the first slot of the probe
 // window, carrying the given original bytes.
 func factProbeFact(content []byte) FactCommit {
@@ -1468,7 +1709,7 @@ func factProbeFact(content []byte) FactCommit {
 			Seq:         1,
 			EventKey:    key,
 			EventTime:   factProbeWindow,
-			Body:        []byte("record:" + string(content)),
+			Body:        factProbeEventBody(content),
 		}.WithChain("fact", "probe"),
 		Ref: OriginalRef{
 			Key:             key,
@@ -1486,7 +1727,7 @@ func factProbeEventKey() string {
 }
 
 // TestOneBatchCarriesAWholeFact pins the commit unit of one fact: every key family lands in one commit and the reopened store answers all of them.
-//   - the batch carries the event body, its index entry, the window meta, the original body and its reference
+//   - the batch carries the event body, its index entry, the window meta and the reference that names the original the same event carries
 //   - a successful commit takes one sequence slot and one event count, in the committing view and in the reopened one
 //
 // 契约: docs/wiki/memory/memory-architecture.md#event-shape
@@ -1509,7 +1750,6 @@ func TestOneBatchCarriesAWholeFact(t *testing.T) {
 		factProbeEventKey(),
 		"1:idx:whole-fact",
 		fmt.Sprintf("1:meta:%d", factProbeWindow),
-		"blob:whole-fact",
 		"ref:whole-fact",
 		"store:seat",
 	}
@@ -1810,7 +2050,10 @@ func TestFactCommitClassifiesEveryPrewriteRefusal(t *testing.T) {
 	t.Run("the file engine refuses a batch carrying several keys", func(t *testing.T) {
 		root, cli := t.TempDir(), t.TempDir()
 		writeRustVikingStub(t, cli)
-		tier, err := OpenTier(ctx, StorageConfig{Type: StorageFile, Root: root, RustVikingBinary: rustVikingStubPath(cli), RustVikingConfig: cli})
+		cfg := StorageConfig{Type: StorageFile, Root: root}
+		cfg.RustVikingBinary = rustVikingStubPath(cli)
+		cfg.RustVikingConfig = cli
+		tier, err := OpenTier(ctx, cfg)
 		if err != nil {
 			t.Fatalf("open the file tier: %v", err)
 		}

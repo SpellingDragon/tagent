@@ -947,6 +947,82 @@ func TestParentLookupKeepsSessionIsolation(t *testing.T) {
 	}
 }
 
+// TestParentHistoryFallbackUsesGreatestOlderSequence pins chain isolation and greatest-older-sequence selection.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#read-paths
+func TestParentHistoryFallbackUsesGreatestOlderSequence(t *testing.T) {
+	ctx := context.Background()
+	root, archiveRoot := t.TempDir(), t.TempDir()
+	cfg := ledger.StorageConfig{Type: ledger.StorageJournal, Root: root, WriteRights: true}
+	cfg.ArchiveRoot = archiveRoot
+	cfg.HotLogMaxBytes = 1
+	writer, err := ledger.OpenTier(ctx, cfg)
+	if err != nil {
+		t.Fatalf("open the archive-backed writer: %v", err)
+	}
+	t.Cleanup(func() { writer.Close() })
+	at := time.Date(2026, 11, 9, 12, 0, 0, 0, time.UTC)
+	partition := memory.PartitionIDFromName("agent-chain")
+	otherPartition := memory.PartitionIDFromName("agent-other")
+	store := func(part int, agent event.AgentID, session event.SessionID, key event.EventID, seq int64) {
+		t.Helper()
+		evt := event.Event{
+			Key:       key,
+			Type:      event.TypeExternalInput,
+			Timestamp: at,
+			Meta:      map[string]string{event.MetaKeyEventSummary: "parent"},
+			Message:   model.Message{Role: model.RoleUser, Content: "parent"},
+			Owner:     event.Address{AgentID: agent, SessionID: session},
+		}
+		body, err := memory.BodyFromEvent(evt, "test", "test")
+		if err != nil {
+			t.Fatalf("encode %s: %v", key, err)
+		}
+		encoded, err := body.Encode()
+		if err != nil {
+			t.Fatalf("marshal %s: %v", key, err)
+		}
+		if err := writer.Segments.StoreEvent(ctx, ledger.SegmentRecord{
+			PartitionID: part,
+			WindowTS:    at.UnixMilli(),
+			Seq:         seq,
+			EventKey:    key,
+			EventTime:   at.UnixMilli(),
+			Body:        encoded,
+		}.WithChain(evt.Type, session)); err != nil {
+			t.Fatalf("store %s: %v", key, err)
+		}
+	}
+	store(partition, "agent-chain", "session-chain", "history-high", 5)
+	store(partition, "agent-chain", "session-chain", "history-low", 3)
+	store(partition, "agent-chain", "session-foreign", "foreign-session", 9)
+	store(partition, "agent-chain", "session-chain", "-synthetic", 8)
+	store(otherPartition, "agent-other", "session-chain", "foreign-partition", 9)
+	if err := writer.Store.Commit(ctx, ledger.Batch{Puts: []ledger.Pair{{Key: fmt.Sprintf("checkpoint:%d:1", partition), Value: []byte("cut")}}}); err != nil {
+		t.Fatalf("commit the first checkpoint: %v", err)
+	}
+	store(partition, "agent-chain", "session-chain", "history-self", 10)
+	if err := writer.Store.Commit(ctx, ledger.Batch{Puts: []ledger.Pair{{Key: fmt.Sprintf("checkpoint:%d:2", partition), Value: []byte("cut")}}}); err != nil {
+		t.Fatalf("commit the second checkpoint: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close the archive writer: %v", err)
+	}
+	cfg.WriteRights = false
+	reader, err := ledger.OpenTier(ctx, cfg)
+	if err != nil {
+		t.Fatalf("reopen the archive reader: %v", err)
+	}
+	t.Cleanup(func() { reader.Close() })
+	source := NewTierQuerySource(reader.Segments)
+	if parent, err := source.GetParent("history-self"); err != nil || parent != "history-high" {
+		t.Fatalf("the archived fallback parent = (%q, %v), want history-high", parent, err)
+	}
+	if parent, err := source.GetParent("history-high"); err != nil || parent != "history-low" {
+		t.Fatalf("the archived predecessor's parent = (%q, %v), want history-low", parent, err)
+	}
+}
+
 // TestAPointQueryThatWalksTheWholeHistoryIsRed pins the bound the parent lookup rests on.
 //   - the entries the newest lookup names are the chain's, and a lookup naming the history instead answers a count the chain cannot explain
 //

@@ -1087,18 +1087,18 @@ func (r *Run) sink(ctx context.Context, notice task.Notice) error {
 	if !ok {
 		return task.ErrCallFrameMissing
 	}
-	seq, err := r.bookNotice(ctx, frame, notice)
+	seat, err := r.bookNotice(ctx, frame, notice)
 	if err != nil {
 		return err
 	}
 	if r.closeFinished() {
-		return r.retainNoticeOwed(ctx, frame, notice, seq)
+		return r.retainNoticeOwed(ctx, notice, seat)
 	}
 	if refusal := r.loop.Backflow(frame.Identity.InvocationID, notice); refusal != nil {
 		assemblyDebug("tagent: the notice of task %s stays owed under the claim of this process", notice.TaskID)
 		return nil
 	}
-	return r.store.Consume(ctx, frame.Address, frame.Identity.InstanceID, seq)
+	return r.store.Consume(ctx, seat.Address, seat.Instance, seat.AcceptSeq)
 }
 
 // retainNoticeOwed keeps one booked notification owed on the mailbox rather than
@@ -1109,8 +1109,8 @@ func (r *Run) sink(ctx context.Context, notice task.Notice) error {
 // set of this process would drive the result, and the next process reads the
 // notification as the work it still owes. A seat already consumed by the turn the
 // close waited out is answered as settled and keeps its receipt.
-func (r *Run) retainNoticeOwed(ctx context.Context, frame task.CallFrame, notice task.Notice, seq state.AcceptSeq) error {
-	if err := r.store.Release(context.WithoutCancel(ctx), frame.Address, frame.Identity.InstanceID, seq); err != nil && !errors.Is(err, state.ErrClaimSettled) {
+func (r *Run) retainNoticeOwed(ctx context.Context, notice task.Notice, seat state.WorkSeat) error {
+	if err := r.store.Release(context.WithoutCancel(ctx), seat.Address, seat.Instance, seat.AcceptSeq); err != nil && !errors.Is(err, state.ErrClaimSettled) {
 		return fmt.Errorf("tagent: keep the notice of task %s owed: %w", notice.TaskID, err)
 	}
 	assemblyDebug("tagent: the notice of task %s stays owed", notice.TaskID)
@@ -1118,48 +1118,20 @@ func (r *Run) retainNoticeOwed(ctx context.Context, frame task.CallFrame, notice
 }
 
 // bookNotice records the mailbox time points of one settled notification that
-// precede its handover in the state owner's own bookkeeping: the delivery route
+// precede its hand-over in the state owner's own bookkeeping: the delivery route
 // of the task is registered beside the call frame the notification belongs to,
-// the notice is accepted into the mailbox of its target site, and the accepted
-// input is claimed by the executor that hands it on. The acceptance is
-// idempotent by the notification's stable identity, so a delivery the manager
-// already accepted records no second fact here. The completed consumption is
-// recorded by the caller after the handover, never here: a claim is not a
-// confirmation, and a receipt written before the handover would drop an
-// undelivered notification from the chain the restart rebuilds.
-func (r *Run) bookNotice(ctx context.Context, frame task.CallFrame, notice task.Notice) (state.AcceptSeq, error) {
+// then the notice is accepted and claimed in one store critical section. The
+// completed consumption is recorded by the caller after the hand-over, never here:
+// a claim is not a confirmation, and a receipt written before the hand-over would
+// drop an undelivered notification from the chain the restart rebuilds.
+func (r *Run) bookNotice(ctx context.Context, frame task.CallFrame, notice task.Notice) (state.WorkSeat, error) {
 	if err := r.store.TrackDelivery(ctx, notice.TaskID, task.HandoffTarget{
 		Target:         frame.Address,
 		TargetInstance: frame.Identity.InstanceID,
 	}); err != nil {
-		return 0, err
+		return state.WorkSeat{}, err
 	}
-	if err := r.store.AcceptNotice(ctx, notice); err != nil {
-		return 0, err
-	}
-	site, err := r.store.Site(ctx, r.inspector, frame.Address, frame.Identity.InstanceID)
-	if err != nil {
-		return 0, err
-	}
-	seq, ok := mailboxSeqOf(site, notice)
-	if !ok {
-		return 0, state.ErrEntryUnknown
-	}
-	if err := r.store.Claim(ctx, frame.Address, frame.Identity.InstanceID, seq); err != nil {
-		return 0, err
-	}
-	return seq, nil
-}
-
-// mailboxSeqOf reports the acceptance sequence the mailbox of the site assigned
-// to the named notification.
-func mailboxSeqOf(site *state.Session, notice task.Notice) (state.AcceptSeq, bool) {
-	for i := range site.Mailbox {
-		if site.Mailbox[i].Notice == notice {
-			return site.Mailbox[i].AcceptSeq, true
-		}
-	}
-	return 0, false
+	return r.store.AcceptNoticeClaimed(ctx, notice)
 }
 
 // SessionHistory reports the transcript the named session accumulated across

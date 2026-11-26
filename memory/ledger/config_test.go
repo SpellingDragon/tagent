@@ -6,13 +6,16 @@
 package ledger
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/SpellingDragon/tagent/api/event"
 )
@@ -28,6 +31,120 @@ const secondWriterSlot = 1
 
 // secondWriterAdmitted marks a child process whose open of the root succeeded.
 const secondWriterAdmitted = "admitted"
+
+// TestOpenTierRefusesHalfArchiveConfig pins the public tier's archive declaration gate.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#store-instance-sharing
+func TestOpenTierRefusesHalfArchiveConfig(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		set  func(*StorageConfig)
+	}{
+		{name: "budget without root", set: func(c *StorageConfig) { c.HotLogMaxBytes = 1 }},
+		{name: "root without budget", set: func(c *StorageConfig) {
+			c.WriteRights = true
+			c.ArchiveRoot = t.TempDir()
+		}},
+		{name: "age without root", set: func(c *StorageConfig) { c.ArchiveMaxAge = time.Hour }},
+		{name: "negative budget", set: func(c *StorageConfig) {
+			c.ArchiveRoot = t.TempDir()
+			c.HotLogMaxBytes = -1
+		}},
+		{name: "negative age", set: func(c *StorageConfig) {
+			c.ArchiveRoot = t.TempDir()
+			c.HotLogMaxBytes = 1
+			c.ArchiveMaxAge = -time.Hour
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := StorageConfig{Type: StorageJournal, Root: t.TempDir()}
+			test.set(&cfg)
+			tier, err := OpenTier(context.Background(), cfg)
+			if tier != nil {
+				tier.Close()
+			}
+			if !errors.Is(err, ErrArchiveConfig) {
+				t.Fatalf("OpenTier with %s = (%v, %v), want ErrArchiveConfig", test.name, tier, err)
+			}
+		})
+	}
+}
+
+// TestOpenTierReadOnlyViewDeclaresArchiveRootAlone pins the archive root as a read source.
+//   - a view holding no write rights opens with archive_root alone and no hot log budget
+//   - a key the hot log does not state reads back through the archive root
+//   - the same view still holds no write rights, so the writer's pairing gate is unchanged
+//
+// 契约: docs/wiki/memory/memory-architecture.md#store-instance-sharing
+func TestOpenTierReadOnlyViewDeclaresArchiveRootAlone(t *testing.T) {
+	ctx := context.Background()
+	root, archiveRoot := t.TempDir(), t.TempDir()
+	writerCfg := StorageConfig{Type: StorageJournal, Root: root, WriteRights: true}
+	writerCfg.ArchiveRoot = archiveRoot
+	writerCfg.HotLogMaxBytes = 1
+	writer, err := OpenTier(ctx, writerCfg)
+	if err != nil {
+		t.Fatalf("open the archive-backed writer: %v", err)
+	}
+	t.Cleanup(func() { writer.Close() })
+	archived := segmentRecord(7, 1000, 1, "read-only-archive-event", 256)
+	hot := segmentRecord(7, 1001, 2, "read-only-hot-event", 256)
+	if err := writer.Segments.StoreEvent(ctx, archived); err != nil {
+		t.Fatalf("store the archived event: %v", err)
+	}
+	if err := writer.Store.Commit(ctx, Batch{Puts: []Pair{{Key: "checkpoint:7:1", Value: []byte("cut")}}}); err != nil {
+		t.Fatalf("commit the first checkpoint: %v", err)
+	}
+	if err := writer.Segments.StoreEvent(ctx, hot); err != nil {
+		t.Fatalf("store the hot event: %v", err)
+	}
+	if err := writer.Store.Commit(ctx, Batch{Puts: []Pair{{Key: "checkpoint:7:2", Value: []byte("cut")}}}); err != nil {
+		t.Fatalf("commit the second checkpoint: %v", err)
+	}
+	moved, err := filepath.Glob(filepath.Join(archiveRoot, journalSegmentDirName, "seg-*.log"))
+	if err != nil || len(moved) != 1 {
+		t.Fatalf("the archive segments = %v err=%v, want one moved interval", moved, err)
+	}
+	readerCfg := StorageConfig{Type: StorageJournal, Root: root}
+	readerCfg.ArchiveRoot = archiveRoot
+	reader, err := OpenTier(ctx, readerCfg)
+	if err != nil {
+		t.Fatalf("open the view naming archive_root alone: %v", err)
+	}
+	t.Cleanup(func() { reader.Close() })
+	stored, held, err := reader.Segments.GetEvent(ctx, archived.EventKey)
+	if err != nil || !held || !bytes.Equal(stored.Body, archived.Body) {
+		t.Fatalf("the archived event read through the read-only view = (%t, %v), want its committed bytes", held, err)
+	}
+	if err := reader.Store.Commit(ctx, Batch{Puts: []Pair{{Key: "read-only:write", Value: []byte("no")}}}); !errors.Is(err, ErrCommitWithoutWriteRights) {
+		t.Fatalf("a commit through the view naming archive_root alone = %v, want ErrCommitWithoutWriteRights", err)
+	}
+}
+
+// TestArchiveMaxAgeReachesJournalView pins the storage configuration's archive window.
+//   - OpenAtomicStore passes the configured duration to the journal view unchanged
+//   - an omitted duration leaves the view's archive age at zero
+func TestArchiveMaxAgeReachesJournalView(t *testing.T) {
+	for _, age := range []time.Duration{0, 2 * time.Hour} {
+		cfg := StorageConfig{Type: StorageJournal, Root: t.TempDir()}
+		cfg.ArchiveMaxAge = age
+		store, err := OpenAtomicStore(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("open the store with archive age %s: %v", age, err)
+		}
+		kv, ok := store.(*journalKV)
+		if !ok {
+			t.Fatalf("OpenAtomicStore returned %T, want the journal view", store)
+		}
+		if kv.archiveMaxAge != age {
+			kv.log.close()
+			t.Fatalf("the journal view states archive age %s, want %s", kv.archiveMaxAge, age)
+		}
+		if err := kv.log.close(); err != nil {
+			t.Fatalf("close the store with archive age %s: %v", age, err)
+		}
+	}
+}
 
 // TestSecondProcessOnOneRootIsRefusedWriteRights pins the one-writer admission of one storage root across two processes.
 //   - the second process is refused the root by name, so it never lands a body over the slot the first writer's index points at

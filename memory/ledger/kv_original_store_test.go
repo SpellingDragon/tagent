@@ -449,7 +449,7 @@ func TestCommitReadsTheOriginalOfItsOwnIdentityAtEveryDepth(t *testing.T) {
 				generation, identityReads[generation], series)
 		}
 	}
-	family, err := tier.Store.Keys(ctx, "blob:")
+	family, err := tier.Store.Keys(ctx, "ref:")
 	if err != nil {
 		t.Fatalf("count the originals the chain holds: %v", err)
 	}
@@ -457,12 +457,15 @@ func TestCommitReadsTheOriginalOfItsOwnIdentityAtEveryDepth(t *testing.T) {
 		t.Fatalf("the original family holds %d identit(ies) beside the %d generations committed, want one a generation: the bound above is taken over a family that grew",
 			len(family), generations)
 	}
+	if copies, err := tier.Store.Keys(ctx, "blob:"); err != nil || len(copies) != 0 {
+		t.Fatalf("the fact commits staged %d body cop(ies) (%v), want none beside the events that carry the text", len(copies), err)
+	}
 	if counted := originals.BlobCount(); counted != generations {
 		t.Fatalf("the whole-store read answers %d identit(ies) of the %d the family holds, want the whole family: the load face is not measured", counted, generations)
 	}
-	if wholeSet, fetched, _ := originals.OriginalsReads(); wholeSet != 1 || fetched != 2*generations {
-		t.Fatalf("the whole-store read loaded the family %d time(s) and fetched %d record(s), want the one load of the %d records the family holds: a load the counter never sees makes the zero above a zero nothing measures",
-			wholeSet, fetched, 2*generations)
+	if wholeSet, fetched, _ := originals.OriginalsReads(); wholeSet != 1 || fetched != generations {
+		t.Fatalf("the whole-store read loaded the family %d time(s) and fetched %d record(s), want the one load of the %d references the family holds: a load the counter never sees makes the zero above a zero nothing measures",
+			wholeSet, fetched, generations)
 	}
 }
 
@@ -774,10 +777,198 @@ func TestOriginalReadEntrypointsPreserveBytesAndScope(t *testing.T) {
 	})
 }
 
+// TestScopedReadChecksReferenceBeforeResolvingBody pins that scope and expiry precede the body, so only an authorized read reports a missing body as corruption.
+//
+// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
+func TestScopedReadChecksReferenceBeforeResolvingBody(t *testing.T) {
+	ctx := context.Background()
+	const key event.EventID = "metadata-before-body"
+	body := []byte("the original whose event body is missing")
+	scope := ReadScope{Owner: event.Address{AgentID: "agent-a", SessionID: "session-a"}, Format: "text", RetentionPolicy: "durable"}
+	outside := ReadScope{Owner: event.Address{AgentID: "agent-b", SessionID: "session-b"}, Format: "text", RetentionPolicy: "durable"}
+	expired := scope
+	expired.RetentionPolicy = "transient"
+	windows := map[string]time.Duration{"transient": 0}
+	for _, tc := range []struct {
+		name    string
+		policy  string
+		read    ReadScope
+		outcome RecallOutcome
+		refusal error
+	}{
+		{name: "outside_scope", policy: "durable", read: outside, outcome: RecallMissing, refusal: ErrOriginalMissing},
+		{name: "expired", policy: "transient", read: expired, outcome: RecallExpired, refusal: ErrOriginalExpired},
+		{name: "authorized_and_unexpired", policy: "durable", read: scope, outcome: RecallFailed, refusal: ErrSnapshotCorrupt},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backing := newMemKV()
+			writer, err := newKVOriginalStore(backing, windows)
+			if err != nil {
+				t.Fatalf("open the seeding original store: %v", err)
+			}
+			ref := OriginalRef{Key: key, Owner: scope.Owner, Format: scope.Format, RetentionPolicy: tc.policy}
+			if err := writer.Put(ctx, ref, body); err != nil {
+				t.Fatalf("commit the original reference: %v", err)
+			}
+			if err := backing.Commit(ctx, Batch{Deletes: []string{blobKVKey(key)}}); err != nil {
+				t.Fatalf("remove the stored body so only the event could carry it: %v", err)
+			}
+			reader, err := newKVOriginalStore(backing, windows)
+			if err != nil {
+				t.Fatalf("open the reading original store: %v", err)
+			}
+			var scoped ScopedOriginalStore = reader
+			got := scoped.GetScoped(ctx, key, tc.read)
+			wantErr := tc.refusal
+			if tc.outcome != RecallFailed {
+				wantErr = nil
+			}
+			if got.Outcome != tc.outcome || !errors.Is(got.Err, wantErr) || len(got.Body) != 0 {
+				t.Fatalf("GetScoped(%q) = %+v, want outcome %v and cause %v without a body", key, got, tc.outcome, wantErr)
+			}
+			segment, err := scoped.ReadSegmentScoped(ctx, key, tc.read, SegmentRequest{MaxBytes: 8})
+			if !errors.Is(err, tc.refusal) || len(segment.Body) != 0 {
+				t.Fatalf("ReadSegmentScoped(%q) = (%+v, %v), want refusal %v without a body", key, segment, err, tc.refusal)
+			}
+		})
+	}
+}
+
+// bodyRefusingKV wraps one engine, refuses the reads of the keys a predicate names and
+// records the key every read names, so a check sees whether a read reached a body.
+type bodyRefusingKV struct {
+	AtomicStore
+	refuse func(key string) bool
+	err    error
+	keys   []string
+}
+
+// Read records the key the fetch names and refuses the ones the predicate names.
+func (k *bodyRefusingKV) Read(ctx context.Context, fetch Fetch) ([]Pair, error) {
+	k.keys = append(k.keys, fetch.Key)
+	if fetch.Key != "" && k.refuse(fetch.Key) {
+		return nil, k.err
+	}
+	return k.AtomicStore.Read(ctx, fetch)
+}
+
+// TestScopedReadDecidesScopeBeforeTheBody pins that a scoped read decides from the reference alone before it reads any body.
+//   - an out-of-scope or expired read reads the reference key alone, so a body the engine cannot read never becomes a failed read
+//   - an authorized read reaches the body, so the same failure is the read's own failure
+//   - a refused read publishes no entry, so the read that may see the identity still answers its bytes
+//
+// 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
+func TestScopedReadDecidesScopeBeforeTheBody(t *testing.T) {
+	ctx := context.Background()
+	scope := ReadScope{Owner: event.Address{AgentID: "agent-a", SessionID: "session-a"}, Format: "text", RetentionPolicy: "durable"}
+	outside := ReadScope{Owner: event.Address{AgentID: "agent-b", SessionID: "session-b"}, Format: "text", RetentionPolicy: "durable"}
+	expired := ReadScope{Owner: scope.Owner, Format: scope.Format, RetentionPolicy: "transient"}
+	windows := map[string]time.Duration{"transient": 0}
+	body := []byte("the original every identity of this fixture stores")
+	backing := newMemKV()
+	writer, err := newKVOriginalStore(backing, windows)
+	if err != nil {
+		t.Fatalf("open the seeding original store: %v", err)
+	}
+	for _, ref := range []OriginalRef{
+		{Key: "authorized", Owner: scope.Owner, Format: "text", RetentionPolicy: "durable"},
+		{Key: "hidden", Owner: outside.Owner, Format: "text", RetentionPolicy: "durable"},
+		{Key: "expired", Owner: scope.Owner, Format: "text", RetentionPolicy: "transient"},
+	} {
+		if err := writer.Put(ctx, ref, body); err != nil {
+			t.Fatalf("commit the original of %q: %v", ref.Key, err)
+		}
+	}
+	unreadable := errors.New("the body of this engine cannot be read")
+	guard := &bodyRefusingKV{AtomicStore: backing, err: unreadable, refuse: func(key string) bool { return strings.HasPrefix(key, "blob:") }}
+	reader, err := newKVOriginalStore(guard, windows)
+	if err != nil {
+		t.Fatalf("open the reading original store: %v", err)
+	}
+	readBodyKey := func(keys []string) bool {
+		for _, key := range keys {
+			if strings.HasPrefix(key, "blob:") {
+				return true
+			}
+		}
+		return false
+	}
+	for _, tc := range []struct {
+		name      string
+		key       event.EventID
+		read      ReadScope
+		outcome   RecallOutcome
+		refusal   error
+		readsBody bool
+	}{
+		{name: "outside_scope", key: "hidden", read: scope, outcome: RecallMissing, refusal: ErrOriginalMissing},
+		{name: "expired", key: "expired", read: expired, outcome: RecallExpired, refusal: ErrOriginalExpired},
+		{name: "authorized", key: "authorized", read: scope, outcome: RecallFailed, readsBody: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			wantGetErr := error(nil)
+			wantSegmentErr := tc.refusal
+			if tc.readsBody {
+				wantGetErr = unreadable
+				wantSegmentErr = unreadable
+			}
+			guard.keys = nil
+			got := reader.GetScoped(ctx, tc.key, tc.read)
+			if got.Outcome != tc.outcome || !errors.Is(got.Err, wantGetErr) || len(got.Body) != 0 {
+				t.Fatalf("GetScoped(%q) = %+v, want outcome %v and cause %v without a body", tc.key, got, tc.outcome, wantGetErr)
+			}
+			reached := readBodyKey(guard.keys)
+			if reached != tc.readsBody {
+				t.Fatalf("GetScoped(%q) read a body %t, want %t: the reference decides the read before the body is read",
+					tc.key, reached, tc.readsBody)
+			}
+			if !tc.readsBody {
+				if want := refKVKey(tc.key); strings.Join(guard.keys, ",") != want {
+					t.Fatalf("GetScoped(%q) read %q, want the reference %q alone", tc.key, guard.keys, want)
+				}
+			}
+			guard.keys = nil
+			segment, err := reader.ReadSegmentScoped(ctx, tc.key, tc.read, SegmentRequest{MaxBytes: 8})
+			if !errors.Is(err, wantSegmentErr) || len(segment.Body) != 0 {
+				t.Fatalf("ReadSegmentScoped(%q) = (%+v, %v), want cause %v without a body", tc.key, segment, err, wantSegmentErr)
+			}
+			if reached := readBodyKey(guard.keys); reached != tc.readsBody {
+				t.Fatalf("ReadSegmentScoped(%q) read a body %t, want %t: the reference decides the read before the body is read",
+					tc.key, reached, tc.readsBody)
+			}
+		})
+	}
+
+	t.Run("a refused read publishes nothing", func(t *testing.T) {
+		backing := newMemKV()
+		writer, err := newKVOriginalStore(backing, nil)
+		if err != nil {
+			t.Fatalf("open the seeding original store: %v", err)
+		}
+		stranger := ReadScope{Owner: event.Address{AgentID: "agent-c", SessionID: "session-c"}, Format: "text", RetentionPolicy: "durable"}
+		for _, owner := range []event.Address{scope.Owner, outside.Owner} {
+			ref := OriginalRef{Key: "shared", Owner: owner, Format: "text", RetentionPolicy: "durable"}
+			if err := writer.Put(ctx, ref, body); err != nil {
+				t.Fatalf("commit the reference of %v: %v", owner, err)
+			}
+		}
+		reader, err := newKVOriginalStore(backing, nil)
+		if err != nil {
+			t.Fatalf("open the reading original store: %v", err)
+		}
+		if refused := reader.GetScoped(ctx, "shared", stranger); refused.Outcome != RecallMissing {
+			t.Fatalf("GetScoped(%q) outside its scopes = %+v, want the named missing", "shared", refused)
+		}
+		if got := reader.GetScoped(ctx, "shared", scope); got.Outcome != RecallFound || !bytes.Equal(got.Body, body) {
+			t.Fatalf("GetScoped(%q) beside the refused read = %+v, want the committed bytes: a refused read publishes no entry", "shared", got)
+		}
+	})
+}
+
 // TestScopedReadResolvesTheNamedIdentity pins what one scoped read costs and how far its failure reaches.
 //   - a scoped read resolves the one identity it names: two point reads of that identity and no load of the original family, whatever that family grew to
 //   - a hot read of the same identity reads no key again, so the two reads are the first read of one identity and not a constant the read adds every time
-//   - a key whose references all stand outside the scope reads as missing beside the same two point reads, so a refused scope leaks nothing and reads no family
+//   - a key whose references all stand outside the scope reads as missing beside its one point reference read, so a refused scope leaks nothing and reads no body
 //   - the whole-set load stays reachable and measured, so the zero above is a zero this check drives instead of a counter nothing runs
 //
 // 契约: docs/wiki/memory/memory-architecture.md#local-file-kv
@@ -853,8 +1044,8 @@ func TestScopedReadResolvesTheNamedIdentity(t *testing.T) {
 	if loads := refusedLoads - outLoads; loads != 0 {
 		t.Fatalf("the read outside the scope loaded the whole original family %d time(s), want none: the scope decides over the identity and never over the family", loads)
 	}
-	if keys := outKeysAfter - outKeysBefore; keys != 2 {
-		t.Fatalf("the read outside the scope read %d key(s), want the two of the identity it names", keys)
+	if keys := outKeysAfter - outKeysBefore; keys != 1 {
+		t.Fatalf("the read outside the scope read %d key(s), want the reference of the identity it names alone", keys)
 	}
 	if counted := reader.BlobCount(); counted != generations {
 		t.Fatalf("the whole-store read answers %d identit(ies) of the %d the family holds, want the whole family: the load face is not measured", counted, generations)
@@ -912,7 +1103,7 @@ func TestCommitFactMemoryTierRecallsTheOriginalByBareKey(t *testing.T) {
 	}()
 	const body = "the original the memory tier commits"
 	fact := FactCommit{
-		Record: SegmentRecord{PartitionID: 1, WindowTS: 1700000000000, Seq: 1, EventKey: "memory-event", EventTime: 1700000000000, Body: []byte("event body")}.WithChain("answer", "session-memory-original"),
+		Record: SegmentRecord{PartitionID: 1, WindowTS: 1700000000000, Seq: 1, EventKey: "memory-event", EventTime: 1700000000000, Body: factProbeEventBody([]byte(body))}.WithChain("answer", "session-memory-original"),
 		Ref:    OriginalRef{Key: "memory-original", Owner: event.Address{AgentID: "agent-a", SessionID: "session-memory-original"}, Format: "text"},
 		Body:   []byte(body),
 	}
@@ -928,5 +1119,275 @@ func TestCommitFactMemoryTierRecallsTheOriginalByBareKey(t *testing.T) {
 	}
 	if got := tier.Originals.Get(ctx, fact.Ref.Key); got.Outcome != RecallFound || string(got.Body) != body {
 		t.Fatalf("recall_get(%q) = %+v, want the committed text %q served by bare key: the memory tier's original and segment share one engine", fact.Ref.Key, got, body)
+	}
+}
+
+// oneCopyFact names one fact of a journal root, carrying content as the original
+// its reference names and as the text its event body holds.
+func oneCopyFact(key event.EventID, content []byte) FactCommit {
+	return FactCommit{
+		Record: SegmentRecord{
+			PartitionID: 1, WindowTS: 1700000000000, Seq: 1, EventKey: key,
+			EventTime: 1700000000000, Body: factProbeEventBody(content),
+		}.WithChain("answer", "session-one-copy"),
+		Ref: OriginalRef{
+			Key: key, Owner: event.Address{AgentID: "agent-a", SessionID: "session-one-copy"},
+			Format: "text", RetentionPolicy: "keep",
+		},
+		Body: content,
+	}
+}
+
+// TestFreshRootStagesNoBlobCopy pins that one committed fact keeps its text in one place and that a second content stays refused.
+//   - the commit lands the reference that names the text and no copy of the text beside the event that carries it
+//   - the reference states the completeness of those bytes, so other content under the key is refused although the store keeps no body of its own there
+//   - a second scope on the same bytes joins the references and stages no copy either, in the committing view and in the reopened one
+//
+// 契约: docs/wiki/memory/memory-architecture.md#event-shape
+func TestFreshRootStagesNoBlobCopy(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	tier, err := OpenTier(ctx, StorageConfig{Type: StorageJournal, Root: root, WriteRights: true})
+	if err != nil {
+		t.Fatalf("open the tier of the fixture: %v", err)
+	}
+	content := []byte("the text one fact commits inside its event\nsecond line of the same text")
+	fact := oneCopyFact("one-copy-fact", content)
+	if outcome, err := CommitFact(ctx, tier, fact); err != nil || outcome != FactCommitted {
+		t.Fatalf("the commit of the fact = (%v, %v), want a committed fact", outcome, err)
+	}
+	family := func(t *testing.T, store AtomicStore, view string) {
+		t.Helper()
+		copies, err := store.Keys(ctx, "blob:")
+		if err != nil {
+			t.Fatalf("read the bodies %s: %v", view, err)
+		}
+		if len(copies) != 0 {
+			t.Fatalf("the %s holds %v, want no copy of the text beside the event that carries it", view, copies)
+		}
+	}
+	family(t, tier.Store, "committing view")
+	if err := tier.Originals.Put(ctx, fact.Ref, []byte("other bytes under the same identity")); !errors.Is(err, ErrContentConflict) {
+		t.Fatalf("other content under the committed identity = %v, want the named conflict its reference states", err)
+	}
+	joined := fact.Ref
+	joined.Owner = event.Address{AgentID: "agent-b", SessionID: "session-one-copy"}
+	if err := tier.Originals.Put(ctx, joined, content); err != nil {
+		t.Fatalf("a second scope on the same bytes = %v, want the reference joined", err)
+	}
+	family(t, tier.Store, "committing view after the second scope")
+	if err := tier.Close(); err != nil {
+		t.Fatalf("close the tier of the fixture: %v", err)
+	}
+	reopened, err := OpenTier(ctx, StorageConfig{Type: StorageJournal, Root: root, WriteRights: true})
+	if err != nil {
+		t.Fatalf("reopen the root of the fixture: %v", err)
+	}
+	defer func() {
+		if err := reopened.Close(); err != nil {
+			t.Fatalf("close the reopened tier: %v", err)
+		}
+	}()
+	family(t, reopened.Store, "reopened root")
+	store, held := reopened.Originals.(*kvOriginalStore)
+	if !held {
+		t.Fatalf("the reopened root holds the originals %T, want the store these reads measure", reopened.Originals)
+	}
+	if refs := store.References(fact.Ref.Key); len(refs) != 2 {
+		t.Fatalf("the reopened root registers %d reference(s) of %q, want the two scopes", len(refs), fact.Ref.Key)
+	}
+	if err := reopened.Originals.Put(ctx, fact.Ref, []byte("other bytes under the same identity")); !errors.Is(err, ErrContentConflict) {
+		t.Fatalf("other content under the identity read back from the root = %v, want the named conflict its reference states: the judgment reads the references, because this root keeps no body beside them", err)
+	}
+	if served := reopened.Originals.Get(ctx, fact.Ref.Key); served.Outcome != RecallFound || !bytes.Equal(served.Body, content) {
+		t.Fatalf("the read of %q after the refused commit = %+v, want the committed text %q", fact.Ref.Key, served, content)
+	}
+}
+
+// TestRecallReadsTheEventBodyWhenNoBlobIsStaged pins the read of an original whose commit kept its text inside the event.
+//   - the cold read, the scoped read and the byte-bounded segments answer the committed text byte for byte
+//   - the line-bounded face cuts the same text, so the two segment faces read one body
+//   - a key no reference names stays the named missing result, so the failure states are not folded into one
+//
+// 契约: docs/wiki/memory/memory-architecture.md#event-shape
+func TestRecallReadsTheEventBodyWhenNoBlobIsStaged(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	const body = "第一行 the first line\nsecond line 第二行\nthird line"
+	fact := oneCopyFact("event-body-original", []byte(body))
+	writer, err := OpenTier(ctx, StorageConfig{Type: StorageJournal, Root: root, WriteRights: true})
+	if err != nil {
+		t.Fatalf("open the tier of the fixture: %v", err)
+	}
+	if outcome, err := CommitFact(ctx, writer, fact); err != nil || outcome != FactCommitted {
+		t.Fatalf("the commit of the fact = (%v, %v), want a committed fact", outcome, err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close the tier of the fixture: %v", err)
+	}
+	reopened, err := OpenTier(ctx, StorageConfig{Type: StorageJournal, Root: root})
+	if err != nil {
+		t.Fatalf("reopen the root of the fixture: %v", err)
+	}
+	defer func() {
+		if err := reopened.Close(); err != nil {
+			t.Fatalf("close the reopened tier: %v", err)
+		}
+	}()
+	got := reopened.Originals.Get(ctx, fact.Ref.Key)
+	if got.Outcome != RecallFound || !bytes.Equal(got.Body, []byte(body)) {
+		t.Fatalf("the cold read of %q = %+v, want the committed text %q read out of its event", fact.Ref.Key, got, body)
+	}
+	scoped, held := reopened.Originals.(ScopedOriginalStore)
+	if !held {
+		t.Fatalf("the reopened tier holds the originals %T, want the scoped read face", reopened.Originals)
+	}
+	scope := fact.Ref.ReadScope()
+	if inside := scoped.GetScoped(ctx, fact.Ref.Key, scope); inside.Outcome != RecallFound || !bytes.Equal(inside.Body, []byte(body)) {
+		t.Fatalf("the scoped read of %q = %+v, want the committed text %q", fact.Ref.Key, inside, body)
+	}
+	assembled, err := assembleSegments(func(from SegmentPosition) (SegmentResult, error) {
+		return scoped.ReadSegmentScoped(ctx, fact.Ref.Key, scope, SegmentRequest{From: from, MaxBytes: 8})
+	})
+	if err != nil || !bytes.Equal(assembled, []byte(body)) {
+		t.Fatalf("the segments of %q = (%q, %v), want the committed text assembled from its segments", fact.Ref.Key, assembled, err)
+	}
+	line, err := reopened.Originals.ReadSegment(ctx, fact.Ref.Key, 2, 1)
+	if err != nil || !bytes.Equal(line, []byte("second line 第二行\n")) {
+		t.Fatalf("the second line of %q = (%q, %v), want the line the same body carries", fact.Ref.Key, line, err)
+	}
+	if missing := reopened.Originals.Get(ctx, "no-such-identity"); missing.Outcome != RecallMissing {
+		t.Fatalf("a key no reference names = %+v, want the named missing result beside the served one", missing)
+	}
+	if _, err := scoped.ReadSegmentScoped(ctx, "no-such-identity", scope, SegmentRequest{MaxBytes: 8}); !errors.Is(err, ErrOriginalMissing) {
+		t.Fatalf("a segment of a key no reference names = %v, want the named missing refusal", err)
+	}
+}
+
+// TestOldBlobRootReadsUnchanged pins the reads of a root whose originals were committed beside their references.
+//   - the whole read and the scoped reads answer the stored bytes
+//   - the read opens no chain view, so a reference carrying its own body is served without one
+//   - other bytes under that key stay refused, which is the judgment the stored body states
+//
+// 契约: docs/wiki/memory/memory-architecture.md#event-shape
+func TestOldBlobRootReadsUnchanged(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	const body = "the text a root stores beside its reference\nsecond line of the same text"
+	ref := OriginalRef{
+		Key: "stored-beside", Owner: event.Address{AgentID: "agent-a", SessionID: "session-old-root"},
+		Format: "text", RetentionPolicy: "keep",
+	}
+	writer, err := OpenTier(ctx, StorageConfig{Type: StorageJournal, Root: root, WriteRights: true})
+	if err != nil {
+		t.Fatalf("open the tier of the fixture: %v", err)
+	}
+	if err := writer.Originals.Put(ctx, ref, []byte(body)); err != nil {
+		t.Fatalf("commit the original beside its reference: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close the tier of the fixture: %v", err)
+	}
+	reopened, err := OpenTier(ctx, StorageConfig{Type: StorageJournal, Root: root})
+	if err != nil {
+		t.Fatalf("reopen the root of the fixture: %v", err)
+	}
+	defer func() {
+		if err := reopened.Close(); err != nil {
+			t.Fatalf("close the reopened tier: %v", err)
+		}
+	}()
+	got := reopened.Originals.Get(ctx, ref.Key)
+	if got.Outcome != RecallFound || !bytes.Equal(got.Body, []byte(body)) {
+		t.Fatalf("the read of %q = %+v, want the bytes stored beside its reference", ref.Key, got)
+	}
+	scoped, held := reopened.Originals.(ScopedOriginalStore)
+	if !held {
+		t.Fatalf("the reopened tier holds the originals %T, want the scoped read face", reopened.Originals)
+	}
+	if inside := scoped.GetScoped(ctx, ref.Key, ref.ReadScope()); inside.Outcome != RecallFound || !bytes.Equal(inside.Body, []byte(body)) {
+		t.Fatalf("the scoped read of %q = %+v, want the bytes stored beside its reference", ref.Key, inside)
+	}
+	assembled, err := assembleSegments(func(from SegmentPosition) (SegmentResult, error) {
+		return scoped.ReadSegmentScoped(ctx, ref.Key, ref.ReadScope(), SegmentRequest{From: from, MaxBytes: 8})
+	})
+	if err != nil || !bytes.Equal(assembled, []byte(body)) {
+		t.Fatalf("the segments of %q = (%q, %v), want the stored bytes assembled from its segments", ref.Key, assembled, err)
+	}
+	store, held := reopened.Originals.(*kvOriginalStore)
+	if !held {
+		t.Fatalf("the reopened tier holds the originals %T, want the store these reads measure", reopened.Originals)
+	}
+	if store.segments != nil {
+		t.Fatal("the read of a root whose references carry their bodies opened the chain view, want the stored body alone")
+	}
+	if err := reopened.Originals.Put(ctx, ref, []byte("other bytes under the same identity")); !errors.Is(err, ErrContentConflict) {
+		t.Fatalf("other content under a stored identity = %v, want the named conflict its stored body states", err)
+	}
+}
+
+// TestOriginalsOfRefusesDivergentReferenceIntegrity pins one body filed under one recorded completeness.
+//   - references of one key that state different digests or lengths are corrupt metadata, refused by name instead of answered from the last record reached
+//   - every read of such a store answers the same named refusal, so no read serves the stored bytes or a digest and length the reader cannot expect
+//
+// 契约: docs/wiki/memory/memory-architecture.md#event-shape
+func TestOriginalsOfRefusesDivergentReferenceIntegrity(t *testing.T) {
+	ctx := context.Background()
+	body := []byte("the bytes the body key carries")
+	record := func(owner, digest string, length int64) storedRef {
+		return storedRef{
+			OwnerAgent: owner, OwnerSession: "session-divergent",
+			Format: "text", RetentionPolicy: "keep",
+			StoredAt: time.Now(), Digest: digest, Length: length,
+		}
+	}
+	cases := []struct {
+		name    string
+		records []storedRef
+	}{
+		{name: "digest", records: []storedRef{
+			record("agent-a", digestOf(body), int64(len(body))),
+			record("agent-b", digestOf([]byte("other bytes entirely")), int64(len(body))),
+		}},
+		{name: "length", records: []storedRef{
+			record("agent-a", digestOf(body), int64(len(body))),
+			record("agent-b", digestOf(body), int64(len(body))+7),
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			key := event.EventID("divergent-" + tc.name)
+			encoded, err := json.Marshal(tc.records)
+			if err != nil {
+				t.Fatalf("encode the conflicting references: %v", err)
+			}
+			backing := newMemKV()
+			if err := backing.Commit(ctx, Batch{Puts: []Pair{
+				{Key: refKVKey(key), Value: encoded},
+				{Key: blobKVKey(key), Value: body},
+			}}); err != nil {
+				t.Fatalf("commit the conflicting records: %v", err)
+			}
+			blobPairs := []Pair{{Key: blobKVKey(key), Value: body}}
+			refPairs := []Pair{{Key: refKVKey(key), Value: encoded}}
+			for at := 0; at < 12; at++ {
+				entries, err := originalsOf(blobPairs, refPairs)
+				if !errors.Is(err, ErrSnapshotCorrupt) {
+					t.Fatalf("walk %d of the conflicting references = (%d entries, %v), want the named corruption instead of a body filed under one record", at, len(entries), err)
+				}
+			}
+			store, err := newKVOriginalStore(backing, map[string]time.Duration{"keep": time.Hour})
+			if err != nil {
+				t.Fatalf("open the original store: %v", err)
+			}
+			for at := 0; at < 12; at++ {
+				if got := store.Get(ctx, key); got.Outcome != RecallFailed || !errors.Is(got.Err, ErrSnapshotCorrupt) {
+					t.Fatalf("read %d of the conflicting references = %+v, want the named corruption, never the stored bytes", at, got)
+				}
+			}
+			if err := store.ensureLoaded(); !errors.Is(err, ErrSnapshotCorrupt) {
+				t.Fatalf("the whole-set load of the conflicting references = %v, want the named corruption", err)
+			}
+		})
 	}
 }

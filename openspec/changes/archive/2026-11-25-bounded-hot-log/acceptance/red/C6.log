@@ -1,0 +1,10 @@
+command: go test -overlay=/tmp/tagent-f3-C6/overlay.json ./assembly -count=1 -run '^TestHotLogPlateausAcrossGenerationsAndOldFactsStayReadable$' -v
+exit: 1
+    checkpoint_test.go:7161: no-archive gen1 produced hot_segments=1 manifest_segments=0 archive_bytes=0
+    checkpoint_test.go:7161: no-archive gen2 produced hot_segments=2 manifest_segments=0 archive_bytes=0
+    checkpoint_test.go:7161: no-archive gen3 produced hot_segments=3 manifest_segments=0 archive_bytes=0
+    checkpoint_test.go:7161: no-archive gen4 produced hot_segments=4 manifest_segments=0 archive_bytes=0
+    checkpoint_test.go:7171: the no-archive root produced archive artifacts
+--- FAIL: TestHotLogPlateausAcrossGenerationsAndOldFactsStayReadable (1.91s)
+FAIL
+FAIL	github.com/SpellingDragon/tagent/assembly	2.267s

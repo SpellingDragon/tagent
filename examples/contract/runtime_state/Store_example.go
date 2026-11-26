@@ -3,6 +3,8 @@ package stateexample
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 
 	"github.com/SpellingDragon/tagent/api/event"
 	"github.com/SpellingDragon/tagent/runtime/state"
@@ -25,17 +27,22 @@ type noticeID struct {
 // one prepared plan as the next effective generation, closes a session's own side and
 // accepts the notifications a task intends to deliver.
 type sharedFace struct {
+	mu          sync.Mutex
 	instance    event.InstanceID
 	generation  uint64
 	fingerprint string
 	sites       map[event.Address]*state.Session
 	closed      map[event.Address]struct{}
-	accepted    map[noticeID]struct{}
+	deliveries  map[event.TaskID]task.HandoffTarget
+	accepted    map[noticeID]state.WorkSeat
+	nextAccept  state.AcceptSeq
 }
 
 // Establish creates the session site for one explicit address on the given runtime
 // instance.
 func (s *sharedFace) Establish(_ context.Context, addr event.Address, instance event.InstanceID) (*state.Session, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if !addr.IsComplete() {
 		return nil, errIncompleteAddress
 	}
@@ -50,6 +57,8 @@ func (s *sharedFace) Establish(_ context.Context, addr event.Address, instance e
 // Publish admits a fully prepared plan as the next effective binding generation, and
 // discards a plan whose baseline was already advanced.
 func (s *sharedFace) Publish(_ context.Context, plan state.StatePlan) (state.Publication, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if plan.Plan.Fingerprint == s.fingerprint {
 		return state.Publication{Generation: s.generation, Fingerprint: s.fingerprint, Baseline: plan.Plan.Baseline}, nil
 	}
@@ -61,6 +70,8 @@ func (s *sharedFace) Publish(_ context.Context, plan state.StatePlan) (state.Pub
 // CloseSession closes the session's own side, refusing new input while the accepted
 // obligations of the site are kept.
 func (s *sharedFace) CloseSession(_ context.Context, addr event.Address) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if _, ok := s.sites[addr]; !ok {
 		return errIncompleteAddress
 	}
@@ -73,28 +84,82 @@ func (s *sharedFace) CloseSession(_ context.Context, addr event.Address) error {
 
 // AcceptNotice accepts one notification into the mailbox of the target session, idempotent
 // by its stable identity.
-func (s *sharedFace) AcceptNotice(_ context.Context, notice task.Notice) error {
-	id := noticeID{taskID: notice.TaskID, round: notice.Round, kind: notice.Kind, seq: notice.Seq}
-	if s.accepted == nil {
-		s.accepted = map[noticeID]struct{}{}
+func (s *sharedFace) AcceptNotice(ctx context.Context, notice task.Notice) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.acceptNotice(ctx, notice)
+}
+
+func (s *sharedFace) acceptNotice(_ context.Context, notice task.Notice) error {
+	if notice.TaskID == "" {
+		return state.ErrNoticeIdentityMissing
 	}
-	if _, ok := s.accepted[id]; ok {
+	id := noticeID{taskID: notice.TaskID, round: notice.Round, kind: notice.Kind, seq: notice.Seq}
+	if prior, ok := s.accepted[id]; ok {
+		if prior.Notice != notice {
+			return state.ErrNoticeConflict
+		}
 		return nil
 	}
-	s.accepted[id] = struct{}{}
+	route, ok := s.deliveries[notice.TaskID]
+	if !ok {
+		return state.ErrDeliveryNotAllowed
+	}
+	site, ok := s.sites[route.Target]
+	if !ok {
+		return state.ErrUnknownTarget
+	}
+	if site.Instance != route.TargetInstance {
+		return state.ErrInstanceRetired
+	}
+	if _, closed := s.closed[route.Target]; closed {
+		return fmt.Errorf("%w: %w", state.ErrDeliveryRefused, state.ErrSessionClosed)
+	}
+	if s.accepted == nil {
+		s.accepted = map[noticeID]state.WorkSeat{}
+	}
+	s.nextAccept++
+	s.accepted[id] = state.WorkSeat{
+		Address:   route.Target,
+		Instance:  route.TargetInstance,
+		AcceptSeq: s.nextAccept,
+		Notice:    notice,
+		Claim:     state.ClaimPending,
+	}
 	return nil
+}
+
+// AcceptNoticeClaimed accepts and claims one notification in the same call.
+func (s *sharedFace) AcceptNoticeClaimed(ctx context.Context, notice task.Notice) (state.WorkSeat, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.acceptNotice(ctx, notice); err != nil {
+		return state.WorkSeat{}, err
+	}
+	id := noticeID{taskID: notice.TaskID, round: notice.Round, kind: notice.Kind, seq: notice.Seq}
+	seat := s.accepted[id]
+	if seat.Claim != state.ClaimPending {
+		return state.WorkSeat{}, state.ErrClaimConflict
+	}
+	seat.Claim = state.ClaimClaimed
+	s.accepted[id] = seat
+	return seat, nil
 }
 
 var _ state.Store = (*sharedFace)(nil)
 
 // ExampleStore establishes one site, publishes two generations of which the repeated content
-// yields no new one, closes the site and accepts the same notification twice as one fact.
+// yields no new one, accepts the same notification twice as one fact, claims it once and closes the site.
 //
 // 契约: docs/wiki/platform/org-hot-reload.md#overview
 func ExampleStore() {
 	ctx := context.Background()
-	store := &sharedFace{instance: "instance-1"}
+	store := &sharedFace{
+		instance:   "instance-1",
+		deliveries: map[event.TaskID]task.HandoffTarget{},
+	}
 	addr := event.Address{AgentID: "assistant", SessionID: "session-1"}
+	store.deliveries["task-1"] = task.HandoffTarget{Target: addr, TargetInstance: "instance-1"}
 
 	site, err := store.Establish(ctx, addr, "instance-1")
 	if err != nil || site.Instance != "instance-1" {
@@ -111,14 +176,21 @@ func ExampleStore() {
 	if err != nil || second.Generation != 1 {
 		return
 	}
-	if err := store.CloseSession(ctx, addr); err != nil {
-		return
-	}
 	notice := task.Notice{TaskID: "task-1", Round: 1, Kind: task.NoticeSettled, Seq: 1}
 	if err := store.AcceptNotice(ctx, notice); err != nil {
 		return
 	}
 	if err := store.AcceptNotice(ctx, notice); err != nil || len(store.accepted) != 1 {
+		return
+	}
+	seat, err := store.AcceptNoticeClaimed(ctx, notice)
+	if err != nil || seat.Claim != state.ClaimClaimed {
+		return
+	}
+	if _, err := store.AcceptNoticeClaimed(ctx, notice); !errors.Is(err, state.ErrClaimConflict) {
+		return
+	}
+	if err := store.CloseSession(ctx, addr); err != nil {
 		return
 	}
 }

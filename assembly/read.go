@@ -273,7 +273,9 @@ func (p *RecallPort) ChainFailure(key event.EventID) error {
 // engine that states no order-line index (or a key it states none for) costs the walk
 // from the newest record that this reading replaces. A key whose index entry carries
 // no session falls back to the body walk, so two sessions can never be joined
-// accidentally.
+// accidentally. When the hot order states no predecessor, the full-history fallback
+// reads the key's body by identity and selects the greatest older sequence in the
+// same partition and session; archive read failures return unchanged.
 func (s *tierQuerySource) GetParent(key event.EventID) (event.EventID, error) {
 	if key == "" {
 		return "", nil
@@ -283,7 +285,7 @@ func (s *tierQuerySource) GetParent(key event.EventID) (event.EventID, error) {
 	partition := 0
 	session := event.SessionID("")
 	parent := event.EventID("")
-	err := s.segments.EachIndexNewestFirstFrom(context.Background(), key, func(candidate event.EventID, part int, _ int64, _ string, sess event.SessionID) (bool, error) {
+	err := s.segments.EachIndexNewestFirstFromHot(context.Background(), key, func(candidate event.EventID, part int, _ int64, _ string, sess event.SessionID) (bool, error) {
 		if !found {
 			if candidate != key {
 				return true, nil
@@ -316,8 +318,54 @@ func (s *tierQuerySource) GetParent(key event.EventID) (event.EventID, error) {
 	if fallback {
 		return s.parentFromBodies(key, partition)
 	}
-	if !found {
+	if !found || parent == "" {
+		return s.parentFromHistory(key)
+	}
+	return parent, nil
+}
+
+// parentFromHistory resolves a key or predecessor the hot commit order does not
+// state. It reads the key's own body by identity, then enumerates the full event
+// history and keeps the greatest older sequence in the same partition and session.
+// No parent map is retained between calls.
+func (s *tierQuerySource) parentFromHistory(key event.EventID) (event.EventID, error) {
+	ctx := context.Background()
+	stored, held, err := s.segments.GetEvent(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	if !held {
 		return "", nil
+	}
+	own, err := memory.DecodeEventBody(stored.Body)
+	if err != nil {
+		return "", err
+	}
+	evt := own.Event()
+	evt.Key = stored.Key
+	chain := replay.ChainKey{PartitionID: stored.PartitionID, SessionID: sessionOf(evt)}
+	parent := event.EventID("")
+	parentSeq := int64(-1)
+	err = s.segments.EachEvent(ctx, func(candidate ledger.StoredEvent) error {
+		if candidate.Key == key || candidate.PartitionID != chain.PartitionID || candidate.Seq >= stored.Seq || replay.SyntheticKey(candidate.Key) {
+			return nil
+		}
+		body, err := memory.DecodeEventBody(candidate.Body)
+		if err != nil {
+			return err
+		}
+		previous := body.Event()
+		previous.Key = candidate.Key
+		if sessionOf(previous) != chain.SessionID {
+			return nil
+		}
+		if candidate.Seq > parentSeq {
+			parent, parentSeq = candidate.Key, candidate.Seq
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
 	}
 	return parent, nil
 }
@@ -331,7 +379,7 @@ func (s *tierQuerySource) GetParent(key event.EventID) (event.EventID, error) {
 // own partition that this read already placed are read once.
 func (s *tierQuerySource) parentFromBodies(key event.EventID, partition int) (event.EventID, error) {
 	ctx := context.Background()
-	stored, held, err := s.segments.GetEventInPartition(ctx, key, partition)
+	stored, held, err := s.segments.GetEvent(ctx, key)
 	if err != nil {
 		return "", err
 	}
@@ -357,7 +405,7 @@ func (s *tierQuerySource) parentFromBodies(key event.EventID, partition int) (ev
 		if part != partition || replay.SyntheticKey(candidate) {
 			return true, nil
 		}
-		older, held, err := s.segments.GetEventInPartition(ctx, candidate, partition)
+		older, held, err := s.segments.GetEvent(ctx, candidate)
 		if err != nil {
 			return false, err
 		}

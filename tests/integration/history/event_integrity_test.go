@@ -3047,17 +3047,16 @@ func seedRestartProcess(t *testing.T, root, out string, phase restartPhase) {
 // recoverRestartProcess boots the formal host over the same durable root, drives
 // the first actual request of the restart beside the face it sends through,
 // drains, and reads the durable boundary a third opener sees: every reading is
-// this process's own, never a mirror of the seed's memory. The model face is
-// read after the close, because the delivery the pump owes the recovered
-// notification drives a turn of its own beside the invocation and the two
-// requests race for which lands first.
+// this process's own, never a mirror of the seed's memory. A recovered
+// notification finishes its model request and answer before the explicit
+// invocation; a phase with no notification invokes directly.
 func recoverRestartProcess(t *testing.T, root, out string, phase restartPhase) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	report := restartChildReport{Mode: restartModeRecover, Phase: string(phase), PID: os.Getpid()}
 	provider := newRestartProvider(t)
-	sender := &restartSender{}
+	sender := &restartSender{answered: make(chan struct{})}
 	configPath := filepath.Join(t.TempDir(), "host.yaml")
 	if err := os.WriteFile(configPath, []byte(restartHostDocument(root, provider.endpoint())), 0o644); err != nil {
 		t.Fatalf("write the restart host document: %v", err)
@@ -3071,6 +3070,10 @@ func recoverRestartProcess(t *testing.T, root, out string, phase restartPhase) {
 	report.Recovery = consumptionRecoveryViews(run.Recovery())
 	report.Tasks = consumptionTaskViews(t, ctx, run, addresses)
 	report.Notices = consumptionNoticeViews(t, ctx, run, addresses)
+	switch phase {
+	case restartAfterCommit, restartAfterClaim, restartBeforeConfirmation:
+		waitRestartNotice(t, ctx, phase, provider, sender)
+	}
 	if _, err := host.Invoke(ctx, assembly.InvokeRequest{
 		InvocationID: "inv-restart-recover",
 		Address:      restartSeedAddress,
@@ -3101,19 +3104,39 @@ func recoverRestartProcess(t *testing.T, root, out string, phase restartPhase) {
 	writeRestartReport(t, out, report)
 }
 
+// waitRestartNotice waits for the recovered notification's request and answer
+// before the explicit invocation enters the same session.
+func waitRestartNotice(t *testing.T, ctx context.Context, phase restartPhase, provider *restartProvider, sender *restartSender) {
+	t.Helper()
+	waitCtx, cancel := context.WithTimeout(ctx, restartDrainWindow)
+	defer cancel()
+	select {
+	case <-provider.noticeRequested:
+	case <-waitCtx.Done():
+		t.Fatalf("the %s restart notification reached no model request within %s: %v", phase, restartDrainWindow, waitCtx.Err())
+	}
+	select {
+	case <-sender.answered:
+	case <-waitCtx.Done():
+		t.Fatalf("the %s restart notification returned no answer within %s: %v", phase, restartDrainWindow, waitCtx.Err())
+	}
+}
+
 // restartProvider is the scripted model endpoint of the restarted process: it
 // records every request the drive really sent and answers with one final body,
 // so a check reads the request assembly instead of a bookkeeping mirror.
 type restartProvider struct {
-	server *httptest.Server
-	mu     sync.Mutex
-	bodies []map[string]json.RawMessage
+	server          *httptest.Server
+	mu              sync.Mutex
+	bodies          []map[string]json.RawMessage
+	noticeRequested chan struct{}
+	noticeOnce      sync.Once
 }
 
 // newRestartProvider starts the endpoint and closes it with the test.
 func newRestartProvider(t *testing.T) *restartProvider {
 	t.Helper()
-	provider := &restartProvider{}
+	provider := &restartProvider{noticeRequested: make(chan struct{})}
 	provider.server = httptest.NewServer(http.HandlerFunc(provider.serve))
 	t.Cleanup(provider.server.Close)
 	return provider
@@ -3130,6 +3153,9 @@ func (p *restartProvider) serve(w http.ResponseWriter, r *http.Request) {
 	p.mu.Lock()
 	p.bodies = append(p.bodies, body)
 	p.mu.Unlock()
+	if p.requestsCarrying(restartNoticeBody) > 0 {
+		p.noticeOnce.Do(func() { close(p.noticeRequested) })
+	}
 	w.Header().Set("Content-Type", "application/json")
 	fmt.Fprintf(w, `{"id":"scripted","object":"chat.completion","created":1699200000,"choices":[{"index":0,"message":{"role":"assistant","content":%q},"finish_reason":"stop"}]}`, restartAnswerBody)
 }
@@ -3211,17 +3237,22 @@ func restartRequestMessages(body map[string]json.RawMessage) ([]restartRequestMe
 // restartSender is the outbound face of the restarted host: every accepted body
 // is recorded, so the check reads what the restart really sent.
 type restartSender struct {
-	mu      sync.Mutex
-	targets []event.Address
-	sent    []string
+	mu         sync.Mutex
+	targets    []event.Address
+	sent       []string
+	answered   chan struct{}
+	answerOnce sync.Once
 }
 
 // Send records one delivered body beside its target address.
 func (s *restartSender) Send(_ context.Context, target event.Address, content string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.targets = append(s.targets, target)
 	s.sent = append(s.sent, content)
+	s.mu.Unlock()
+	if strings.Contains(content, restartAnswerBody) {
+		s.answerOnce.Do(func() { close(s.answered) })
+	}
 	return nil
 }
 
@@ -3644,8 +3675,8 @@ func restartAssertCrossBoundary(t *testing.T, claimed, confirmed restartOutcome)
 // the recovered notification as a turn of its own no more than once, and sends
 // only the answer its provider returned, so the record is a real Boot request
 // and send instead of a bookkeeping mirror. Each drive is counted on its own
-// rather than in total, because the delivery turn the pump owes races with the
-// invocation turn for which lands first.
+// rather than in total, because a recovered notification and the explicit
+// invocation drive separate turns.
 func restartAssertFirstRequest(t *testing.T, outcome func(*testing.T, restartPhase) restartOutcome) {
 	t.Helper()
 	for _, phase := range []restartPhase{

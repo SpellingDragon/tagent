@@ -1,0 +1,10 @@
+--- a/memory/ledger/journal_kv.go
++++ b/memory/ledger/journal_kv.go
+@@ -512,7 +512,6 @@
+ 		}
+ 		return nil
+ 	}
+-	k.hotOverBudget = 0
+ 	k.hotOverBudgetOpen = false
+ 	return nil
+ }

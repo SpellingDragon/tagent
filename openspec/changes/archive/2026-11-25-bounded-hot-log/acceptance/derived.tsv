@@ -1,0 +1,5 @@
+structure	authority	invalidated_by	rebuilt_by	evidence_file
+segmentIndex	sealed segment frames	readSegmentIndex	rebuildSegmentIndex	memory/ledger/journal_segment.go
+slots/order	journal hot-window frames	cutJournalFront	settleShrunkHotLog	memory/ledger/hot_shrink.go
+residentSet	committed journal frames	installLogLocked	valueLocked	memory/ledger/journal_kv.go
+verifiedCache	manifest segment SHA256	archiveFileSignature	readInSegment	memory/ledger/archive_read.go

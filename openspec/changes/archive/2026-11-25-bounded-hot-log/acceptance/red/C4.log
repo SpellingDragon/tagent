@@ -1,0 +1,8 @@
+command: go test -overlay=/tmp/tagent-bhl-f3/C4/overlay.json ./assembly -count=1 -run '^TestHotLogPlateausAcrossGenerationsAndOldFactsStayReadable$' -v
+exit: 1
+=== RUN   TestHotLogPlateausAcrossGenerationsAndOldFactsStayReadable
+    checkpoint_test.go:6926: boot IntegrityBytesScanned=1443168 > final hot_bytes=833853
+    checkpoint_test.go:6928: boot duration=5.401792ms JournalBytesOpen=0 IntegrityBytesScanned=1443168 final_hot_bytes=833853
+--- FAIL: TestHotLogPlateausAcrossGenerationsAndOldFactsStayReadable (3.14s)
+FAIL
+FAIL	github.com/SpellingDragon/tagent/assembly	3.519s

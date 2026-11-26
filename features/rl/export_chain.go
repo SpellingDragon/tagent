@@ -22,15 +22,17 @@ import (
 // facts one session committed, in the order they committed. The face carries no
 // write method at all, so an export can never move the chain it reads.
 //
-// The assembled runtime answers this face through its own session chain read
-// (Run.SessionFacts), which reports the facts as they committed rather than a
-// reconstruction of them.
+// The assembled runtime answers this face through Run.DurableFactReader, which
+// reports the durable facts as they committed rather than a reconstruction of
+// them.
 // The redline list (2 rules):
 // MUST report the facts as they committed, in commit order.
 // MUST NOT reconstruct or re-classify a fact on the way out.
 type FactReader interface {
-	// SessionFacts reports the facts one session committed, in commit order.
-	SessionFacts(addr event.Address) []event.Event
+	// SessionFacts reports the facts one session committed, in commit order. The
+	// context bounds the read. A cancellation, timeout or storage failure is
+	// returned unchanged with no partial chain.
+	SessionFacts(ctx context.Context, addr event.Address) ([]event.Event, error)
 }
 
 // ErrExportReaderMissing and the other named errors of the chain export: each
@@ -155,7 +157,8 @@ type chainInputFact struct {
 // without the relation exports as it always did rather than losing its inputs.
 // A turn that consumed no input or produced no assistant output is skipped
 // rather than filled with an invented side. The limit bounds the rows emitted,
-// never the pairing.
+// never the pairing. A reader failure ends the export and is returned unchanged;
+// no partial sample set is reported.
 func (e *ChainExporter) Export(ctx context.Context, opts ExportOptions) ([]SFTSample, error) {
 	if e == nil || e.facts == nil {
 		return nil, ErrExportReaderMissing
@@ -176,8 +179,12 @@ func (e *ChainExporter) Export(ctx context.Context, opts ExportOptions) ([]SFTSa
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		facts, err := e.facts.SessionFacts(ctx, event.Address{SessionID: sessionID})
+		if err != nil {
+			return nil, err
+		}
 		var pending []chainInputFact
-		for _, fact := range e.facts.SessionFacts(event.Address{SessionID: sessionID}) {
+		for _, fact := range facts {
 			switch fact.Type {
 			case event.TypeExternalInput:
 				if fact.Message.Content == "" {

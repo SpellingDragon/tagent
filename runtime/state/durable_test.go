@@ -518,6 +518,144 @@ func invariantNotice(taskID event.TaskID, seq int64) task.Notice {
 	}
 }
 
+// TestAcceptNoticeClaimedIsAtomic pins internal handover's acceptance and claim.
+// - the returned entry is already claimed, so a second claim names ErrClaimConflict
+// - repeating the same acceptance names ErrClaimConflict without a second mailbox entry
+func TestAcceptNoticeClaimedIsAtomic(t *testing.T) {
+	ctx := context.Background()
+	store := invariantStore(t)
+	notice := invariantNotice("task-1", 1)
+	seat, err := store.AcceptNoticeClaimed(ctx, notice)
+	if err != nil {
+		t.Fatalf("accept and claim the notice: %v", err)
+	}
+	if seat.Address != invariantAddress || seat.Instance != "instance-a" || seat.Notice != notice || seat.Claim != ClaimClaimed {
+		t.Fatalf("claimed seat = %+v, want the original site's claimed notice", seat)
+	}
+	if err := store.Claim(ctx, seat.Address, seat.Instance, seat.AcceptSeq); !errors.Is(err, ErrClaimConflict) {
+		t.Fatalf("claim the atomically claimed entry = %v, want ErrClaimConflict", err)
+	}
+	repeated, err := store.AcceptNoticeClaimed(ctx, notice)
+	if !errors.Is(err, ErrClaimConflict) {
+		t.Fatalf("repeat acceptance = (%+v, %v), want ErrClaimConflict", repeated, err)
+	}
+	if entries := invariantRead(t, store).Mailbox; len(entries) != 1 {
+		t.Fatalf("mailbox entries = %d, want the one acceptance", len(entries))
+	}
+}
+
+// TestAcceptNoticeClaimedClaimsPendingAcceptance pins the replay path that finishes an earlier acceptance.
+// - an entry left pending by AcceptNotice is claimed without a second mailbox entry
+// - the returned seat names the site and sequence that were actually claimed
+func TestAcceptNoticeClaimedClaimsPendingAcceptance(t *testing.T) {
+	ctx := context.Background()
+	store := invariantStore(t)
+	notice := invariantNotice("task-1", 1)
+	if err := store.AcceptNotice(ctx, notice); err != nil {
+		t.Fatalf("accept the notice without claiming it: %v", err)
+	}
+	other := event.Address{AgentID: "agent-b", SessionID: "session-b"}
+	if _, err := store.Establish(ctx, other, "instance-c"); err != nil {
+		t.Fatalf("establish the other site: %v", err)
+	}
+	if err := store.TrackDelivery(ctx, "task-2", task.HandoffTarget{Target: other, TargetInstance: "instance-c"}); err != nil {
+		t.Fatalf("register the other task's route: %v", err)
+	}
+	if err := store.AcceptNotice(ctx, invariantNotice("task-2", 1)); err != nil {
+		t.Fatalf("accept the other task's notice: %v", err)
+	}
+	if err := store.TrackDelivery(ctx, notice.TaskID, task.HandoffTarget{Target: other, TargetInstance: "instance-c"}); err != nil {
+		t.Fatalf("reroute future notices: %v", err)
+	}
+	seat, err := store.AcceptNoticeClaimed(ctx, notice)
+	if err != nil {
+		t.Fatalf("claim the pending acceptance: %v", err)
+	}
+	if seat.Address != invariantAddress || seat.Instance != "instance-a" || seat.AcceptSeq != 1 || seat.Claim != ClaimClaimed {
+		t.Fatalf("claimed seat = %+v, want sequence 1 at the original site", seat)
+	}
+	if err := store.Claim(ctx, other, "instance-c", 1); err != nil {
+		t.Fatalf("the replay claimed another site's entry: %v", err)
+	}
+	if entries := invariantRead(t, store).Mailbox; len(entries) != 1 {
+		t.Fatalf("mailbox entries = %d, want the one acceptance", len(entries))
+	}
+}
+
+// TestAcceptNoticeClaimedConcurrentReplayHasOneWinner pins the atomic claim under competing handovers.
+// - exactly one concurrent handover claims the notification
+// - every other handover is refused by name and the mailbox keeps one entry
+func TestAcceptNoticeClaimedConcurrentReplayHasOneWinner(t *testing.T) {
+	ctx := context.Background()
+	store := invariantStore(t)
+	notice := invariantNotice("task-1", 1)
+	const handovers = 16
+	start := make(chan struct{})
+	results := make(chan error, handovers)
+	var workers sync.WaitGroup
+	for range handovers {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			_, err := store.AcceptNoticeClaimed(ctx, notice)
+			results <- err
+		}()
+	}
+	close(start)
+	workers.Wait()
+	close(results)
+	winners := 0
+	for err := range results {
+		switch {
+		case err == nil:
+			winners++
+		case errors.Is(err, ErrClaimConflict):
+		default:
+			t.Fatalf("competing handover = %v, want success or ErrClaimConflict", err)
+		}
+	}
+	if winners != 1 {
+		t.Fatalf("winning handovers = %d, want exactly one", winners)
+	}
+	if entries := invariantRead(t, store).Mailbox; len(entries) != 1 {
+		t.Fatalf("mailbox entries = %d, want the one acceptance", len(entries))
+	}
+}
+
+// TestAcceptNoticeClaimedReplayKeepsOriginalSite pins a replay beside its first acceptance.
+// - a later delivery registration never moves or claims the already accepted entry
+// - the same acceptance sequence in another site's mailbox stays untouched
+func TestAcceptNoticeClaimedReplayKeepsOriginalSite(t *testing.T) {
+	ctx := context.Background()
+	store := invariantStore(t)
+	notice := invariantNotice("task-1", 1)
+	_, err := store.AcceptNoticeClaimed(ctx, notice)
+	if err != nil {
+		t.Fatalf("accept and claim the notice: %v", err)
+	}
+	other := event.Address{AgentID: "agent-b", SessionID: "session-b"}
+	if _, err := store.Establish(ctx, other, "instance-c"); err != nil {
+		t.Fatalf("establish the other site: %v", err)
+	}
+	if err := store.TrackDelivery(ctx, "task-2", task.HandoffTarget{Target: other, TargetInstance: "instance-c"}); err != nil {
+		t.Fatalf("register the other task's route: %v", err)
+	}
+	if err := store.AcceptNotice(ctx, invariantNotice("task-2", 1)); err != nil {
+		t.Fatalf("accept the other task's notice: %v", err)
+	}
+	if err := store.TrackDelivery(ctx, notice.TaskID, task.HandoffTarget{Target: other, TargetInstance: "instance-c"}); err != nil {
+		t.Fatalf("reroute future notices: %v", err)
+	}
+	repeated, err := store.AcceptNoticeClaimed(ctx, notice)
+	if !errors.Is(err, ErrClaimConflict) {
+		t.Fatalf("repeat acceptance = (%+v, %v), want ErrClaimConflict", repeated, err)
+	}
+	if err := store.Claim(ctx, other, "instance-c", 1); err != nil {
+		t.Fatalf("the replay claimed another site's entry: %v", err)
+	}
+}
+
 // invariantRecord builds one commit record of the invariants' task at the revision named.
 func invariantRecord(taskID event.TaskID, revision int64, status task.Status, notices ...task.Notice) task.CommitRecord {
 	outbox := make([]task.Envelope, 0, len(notices))

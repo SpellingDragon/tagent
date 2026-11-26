@@ -1,0 +1,7 @@
+command: go test -overlay=/tmp/tagent-red-C7/overlay.json ./memory/ledger -count=1 -run '^TestArchiveMissingIsNamed$' -v
+exit: 1
+=== RUN   TestArchiveMissingIsNamed
+    archive_read_test.go:114: the read of the stated key "seg-01-a" = ([], <nil>), want ErrArchiveMissing
+--- FAIL: TestArchiveMissingIsNamed (0.19s)
+FAIL
+FAIL	github.com/SpellingDragon/tagent/memory/ledger	0.603s

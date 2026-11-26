@@ -894,7 +894,8 @@ func (e *ChainExporter) Export(ctx context.Context, opts ExportOptions) ([]SFTSa
     without the relation exports as it always did rather than losing its inputs.
     A turn that consumed no input or produced no assistant output is skipped
     rather than filled with an invented side. The limit bounds the rows emitted,
-    never the pairing.
+    never the pairing. A reader failure ends the export and is returned
+    unchanged; no partial sample set is reported.
 
 type DatasetRefusal struct {
 	// DecisionID names the decision the refused row belonged to.
@@ -1091,19 +1092,20 @@ type ExportOptions struct {
     session is read once.
 
 type FactReader interface {
-	// SessionFacts reports the facts one session committed, in commit order.
-	SessionFacts(addr event.Address) []event.Event
+	// SessionFacts reports the facts one session committed, in commit order. The
+	// context bounds the read. A cancellation, timeout or storage failure is
+	// returned unchanged with no partial chain.
+	SessionFacts(ctx context.Context, addr event.Address) ([]event.Event, error)
 }
     FactReader is the read-only face of the fact chain the exporter consumes:
     the facts one session committed, in the order they committed. The face
     carries no write method at all, so an export can never move the chain it
     reads.
 
-    The assembled runtime answers this face through its own session chain read
-    (Run.SessionFacts), which reports the facts as they committed rather than a
-    reconstruction of them. The redline list (2 rules): MUST report the facts as
-    they committed, in commit order. MUST NOT reconstruct or re-classify a fact
-    on the way out.
+    The assembled runtime answers this face through Run.DurableFactReader, which
+    reports the durable facts as they committed rather than a reconstruction of
+    them. The redline list (2 rules): MUST report the facts as they committed,
+    in commit order. MUST NOT reconstruct or re-classify a fact on the way out.
 
 type FeedbackAttribution struct {
 	// Bound counts the submissions attributed to recorded evidence.

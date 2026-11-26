@@ -1,0 +1,22 @@
+--- a/memory/ledger/archive.go
++++ b/memory/ledger/archive.go
+@@ -195,19 +195,6 @@
+ 			return nil, false, fmt.Errorf("%w: two slots state generation %d differently", ErrArchiveCorrupt, other.manifest.Generation)
+ 		}
+ 	}
+-	named, err := archiveNamedArtifacts(root)
+-	if err != nil {
+-		return nil, false, fmt.Errorf("%w: read the segment directory of %s: %w", ErrArchiveCorrupt, root, err)
+-	}
+-	stated, err := statedArchiveFiles(root, &best.manifest)
+-	if err != nil {
+-		return nil, false, err
+-	}
+-	for _, name := range named {
+-		if !stated[name] {
+-			return nil, false, archiveCorruptOf("%s holds the segment file %s beside no statement in generation %d", root, name, best.manifest.Generation)
+-		}
+-	}
+ 	return &best.manifest, true, nil
+ }
+ 

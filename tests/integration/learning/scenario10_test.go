@@ -109,7 +109,7 @@ func TestScenario10EpisodeObservationAndReplacement(t *testing.T) {
 		}
 	}
 
-	exporter := rl.NewChainExporter(run)
+	exporter := rl.NewChainExporter(run.DurableFactReader())
 	samples, err := exporter.Export(ctx, rl.ExportOptions{SessionIDs: []event.SessionID{
 		"session-s10-a", "session-s10-b", "session-s10-c", "session-s10-d",
 	}})

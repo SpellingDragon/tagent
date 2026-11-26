@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -112,17 +113,29 @@ func strictKeys(source, path string, n *sourceNode, t reflect.Type) error {
 }
 
 // yamlFields indexes one struct type's document keys by the yaml tag each field
-// declares; an untagged field takes the lowercased field name and a field tagged
-// "-" is outside the document.
+// declares; an untagged field takes the lowercased field name, a field tagged
+// "-" is outside the document, and a field tagged ",inline" contributes the keys
+// of the struct it embeds, so a declaration inlining a section keeps those keys
+// on the section itself.
 func yamlFields(t reflect.Type) map[string]reflect.Type {
 	fields := make(map[string]reflect.Type, t.NumField())
 	for i := 0; i < t.NumField(); i++ {
 		f := t.Field(i)
-		if !f.IsExported() {
+		name, options, _ := strings.Cut(f.Tag.Get("yaml"), ",")
+		if name == "-" {
 			continue
 		}
-		name, _, _ := strings.Cut(f.Tag.Get("yaml"), ",")
-		if name == "-" {
+		if f.Anonymous && slices.Contains(strings.Split(options, ","), "inline") {
+			embedded := f.Type
+			for embedded.Kind() == reflect.Pointer {
+				embedded = embedded.Elem()
+			}
+			for key, keyType := range yamlFields(embedded) {
+				fields[key] = keyType
+			}
+			continue
+		}
+		if !f.IsExported() {
 			continue
 		}
 		if name == "" {

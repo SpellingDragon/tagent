@@ -103,8 +103,8 @@ func TestLocalSmokeWave2Data(t *testing.T) {
 		t.Logf("[wave2-data] chain turns: %d external inputs over %d invocation(s), %d agent outputs",
 			len(inputs), len(inputs), len(outputs))
 
-		// 导出面可达：正式 Run 直接满足 FactReader，导出按链序配对（输入开口、回答闭口）。
-		var reader rl.FactReader = rig.host.Run()
+		// 导出面可达：正式 Run 的 durable adapter 满足 FactReader，导出按链序配对（输入开口、回答闭口）。
+		var reader rl.FactReader = rig.host.Run().DurableFactReader()
 		exporter := rl.NewChainExporter(reader)
 		samples, err := exporter.Export(context.Background(), rl.ExportOptions{
 			SessionIDs: []event.SessionID{addr.SessionID},

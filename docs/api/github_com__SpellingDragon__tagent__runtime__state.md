@@ -1036,6 +1036,13 @@ func (m *MemoryStore) AcceptNotice(ctx context.Context, notice task.Notice) erro
     A target that closed its session did answer: the site refused the input,
     and that refusal is the feedback fact the criterion reads.
 
+func (m *MemoryStore) AcceptNoticeClaimed(ctx context.Context, notice task.Notice) (WorkSeat, error)
+    AcceptNoticeClaimed accepts one notification and claims its entry in the
+    same critical section, so no resident consumer can take the entry between
+    the two steps. It returns the site and sequence actually claimed. A replay
+    claims a still-pending entry in its original site; an entry another executor
+    already claimed or consumed is refused with ErrClaimConflict.
+
 func (m *MemoryStore) Attempt(ctx context.Context, notice task.Notice) (SettleAttempt, bool, error)
     Attempt reports the attempt record of one notification and whether
     this mailbox holds one at all: the record of the one follow-up turn

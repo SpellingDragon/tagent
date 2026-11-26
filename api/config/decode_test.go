@@ -87,6 +87,46 @@ func TestStrictDecodeRefusesEveryUndeclaredShape(t *testing.T) {
 			wantLine: 3,
 		},
 		{
+			name:     "archive root that is not a string",
+			file:     "org.yaml",
+			body:     "agents:\n  - id: main\n    memory:\n      archive_root: 1\n",
+			field:    "agents[0].memory.archive_root",
+			reason:   "expected a string",
+			wantLine: 4,
+		},
+		{
+			name:     "negative hot log budget",
+			file:     "org.yaml",
+			body:     "agents:\n  - id: main\n    memory:\n      hot_log_max_bytes: -1\n",
+			field:    "agents[0].memory.hot_log_max_bytes",
+			reason:   "expected a non-negative whole number",
+			wantLine: 4,
+		},
+		{
+			name:     "fractional hot log budget",
+			file:     "org.yaml",
+			body:     "agents:\n  - id: main\n    memory:\n      hot_log_max_bytes: 1.5\n",
+			field:    "agents[0].memory.hot_log_max_bytes",
+			reason:   "expected a whole number",
+			wantLine: 4,
+		},
+		{
+			name:     "hot log budget that is not a number",
+			file:     "org.yaml",
+			body:     "agents:\n  - id: main\n    memory:\n      hot_log_max_bytes: true\n",
+			field:    "agents[0].memory.hot_log_max_bytes",
+			reason:   "expected a number",
+			wantLine: 4,
+		},
+		{
+			name:     "archive window that is not a duration",
+			file:     "org.yaml",
+			body:     "agents:\n  - id: main\n    memory:\n      archive_max_age: soon\n",
+			field:    "agents[0].memory.archive_max_age",
+			reason:   "expected a duration such as 30m",
+			wantLine: 4,
+		},
+		{
 			name:     "unknown tool reference key",
 			file:     "org.yaml",
 			body:     "refs:\n  - name: remote\n    extra: 1\n",
@@ -351,6 +391,9 @@ agents:
       type: localfile
       path: /var/lib/tagent/memory
       read_namespaces: [audit, ops]
+      archive_root: /var/lib/tagent/archive
+      hot_log_max_bytes: 1048576
+      archive_max_age: 24h
       engine:
         backend: memory
         embedding:
@@ -383,6 +426,9 @@ agents:
 	agent := decl.Agents[0]
 	if agent.Memory.Type != "localfile" || agent.Memory.Path != "/var/lib/tagent/memory" || len(agent.Memory.ReadNamespaces) != 2 {
 		t.Fatalf("memory = %+v, want the declared tier and read face", agent.Memory)
+	}
+	if agent.Memory.ArchiveRoot != "/var/lib/tagent/archive" || agent.Memory.HotLogMaxBytes != 1048576 || agent.Memory.ArchiveMaxAge != 24*time.Hour {
+		t.Fatalf("memory archive face = %+v, want the three declared fields read by their own readers", agent.Memory)
 	}
 	engine := agent.Memory.Engine
 	if engine.Backend != "memory" {

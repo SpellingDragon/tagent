@@ -41,6 +41,7 @@ import (
 	"github.com/SpellingDragon/tagent/memory/ledger"
 	"github.com/SpellingDragon/tagent/memory/replay"
 	"github.com/SpellingDragon/tagent/runtime/state"
+	trpclog "trpc.group/trpc-go/trpc-agent-go/log"
 )
 
 // CheckpointCommitInterval is the number of commits after which the framework
@@ -581,10 +582,29 @@ func (r *Run) noteCheckpointCommit() {
 	if r == nil {
 		return
 	}
+	requested, overBudget := false, false
+	if r.tier != nil {
+		if probe, held := r.tier.Store.(interface {
+			HotLogCutRequested() bool
+			HotLogOverBudget() int64
+		}); held {
+			requested = probe.HotLogCutRequested()
+			overBudget = probe.HotLogOverBudget() != 0
+		}
+	}
 	r.mu.Lock()
 	r.checkpointCommits++
 	due := r.checkpointCommits >= r.checkpointEvery || time.Since(r.checkpointAt) >= r.checkpointPeriod
+	warn := overBudget && !r.hotBudgetWarning
+	r.hotBudgetWarning = overBudget
 	r.mu.Unlock()
+	if warn {
+		trpclog.Warnf("tagent: hot log remains over its effective byte limit; early cut requested=%t", requested)
+	}
+	if requested {
+		r.requestCheckpoint()
+		return
+	}
 	if !due {
 		return
 	}

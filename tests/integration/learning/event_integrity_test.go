@@ -1285,7 +1285,7 @@ func runIntegrityExportCorrelationIsNotReward(t *testing.T) {
 	steps.audit(t, map[string]int{"one": 1, "two": 1})
 
 	before := host.Run().SessionFacts(addr)
-	exporter := rl.NewChainExporter(host.Run())
+	exporter := rl.NewChainExporter(host.Run().DurableFactReader())
 	samples, err := exporter.Export(ctx, rl.ExportOptions{SessionIDs: []event.SessionID{addr.SessionID}})
 	if err != nil {
 		t.Fatalf("export the chain: %v", err)
@@ -1385,7 +1385,7 @@ func runIntegrityFormalCaptureThenOfflineExport(t *testing.T) {
 		t.Fatalf("capture seal before the close = %+v, want the run-wide account still open", beforeClose)
 	}
 
-	exporter := rl.NewChainExporter(host.Run())
+	exporter := rl.NewChainExporter(host.Run().DurableFactReader())
 	onlyA, err := exporter.Export(ctx, rl.ExportOptions{SessionIDs: []event.SessionID{addrA.SessionID}})
 	if err != nil {
 		t.Fatalf("export the first session: %v", err)

@@ -1,12 +1,17 @@
-Command recover-kv rebuilds the independent bodies a journal root's references
-name but whose blob: keys are absent, the state the original store's load
-refuses by name as ErrSnapshotCorrupt.
+Command recover-kv verifies that every reference a journal root holds is
+answered by the text of its original: a fact commit stages the reference alone
+and commits the text inside the event body of the same key, so the chain is the
+one place that text lives and the recall reads it back from there.
 
-The chain holds the same text: assembly's persistFact commits
-body.Message.Content as the blob and the whole encoded EventBody as the segment
-record of one key, so a missing body is rebuilt from the event of that key
-and accepted only when its sha256 digest and byte length equal the ones the
-reference recorded. The scan is a dry run unless --restore is given. It only
-adds missing bodies: no reference is deleted, no chain record is touched, and a
-body the chain cannot answer for is named with its owner and exits nonzero.
+The command writes nothing. For every reference key of the root it reads
+the copies the root holds of that text — the event body of the key, and the
+independent body a bare commit staged beside the reference — and compares the
+sha256 digest and byte length of each with the ones the references recorded.
+A key the root holds no text for is named truly lost, a copy whose bytes are not
+the ones the reference names is named a mismatch, and either one exits nonzero;
+a root whose every reference is answered by the text it names exits zero.
+The root is read through the one journal view that locates a key in the hot
+index and in the archive manifest alike, so a text the hot files do not carry is
+read from the archive root the operator names and an archive that cannot answer
+is reported by name.
 

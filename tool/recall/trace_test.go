@@ -50,6 +50,95 @@ func (c *traceChainParents) GetParent(key event.EventID) (event.EventID, error) 
 	return c.parent[key], nil
 }
 
+// traceErrorParents answers one fixed parent-read failure.
+type traceErrorParents struct{ err error }
+
+// GetParent returns the configured failure.
+func (t traceErrorParents) GetParent(event.EventID) (event.EventID, error) {
+	return "", t.err
+}
+
+// TestTraceKeepsEventChainFailuresNamed pins failures from an unreadable starting or parent event reaching the caller by name.
+//
+// 契约: docs/wiki/tool/tool-architecture.md#recall-subtools
+func TestTraceKeepsEventChainFailuresNamed(t *testing.T) {
+	items := map[event.EventID]memory.EventReference{
+		"chain-2": {Key: "chain-2", PartitionID: memory.PartitionIDFromName("agent-a")},
+	}
+	for _, failure := range []error{ledger.ErrArchiveMissing, ledger.ErrArchiveCorrupt, errors.New("chain read failed")} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			t.Run("starting event", func(t *testing.T) {
+				tool := &traceTool{base: newBase(Reads{
+					Table: tableStub{failures: map[event.EventID]error{"absent-start": failure}},
+					Trace: &traceChainParents{},
+				}, []string{"agent-a"})}
+				answered, err := tool.Call(context.Background(), []byte(`{"key":"absent-start"}`))
+				if !errors.Is(err, failure) || answered != nil {
+					t.Fatalf("the archive-failed start answered (%v, %v), want the named failure", answered, err)
+				}
+			})
+			t.Run("parent event", func(t *testing.T) {
+				tool := &traceTool{base: newBase(Reads{
+					Table: tableStub{
+						events:   items,
+						failures: map[event.EventID]error{"absent-parent": failure},
+					},
+					Trace: &traceChainParents{parent: map[event.EventID]event.EventID{"chain-2": "absent-parent"}},
+				}, []string{"agent-a"})}
+				answered, err := tool.Call(context.Background(), []byte(`{"key":"chain-2"}`))
+				if !errors.Is(err, failure) || answered != nil {
+					t.Fatalf("the archive-failed parent answered (%v, %v), want the named failure", answered, err)
+				}
+			})
+		})
+	}
+}
+
+// TestTraceKeepsArchiveFailuresNamed pins archive faults staying named and ordinary chain stops keeping their reasons.
+//
+// 契约: docs/wiki/tool/tool-architecture.md#recall-subtools
+func TestTraceKeepsArchiveFailuresNamed(t *testing.T) {
+	items := map[event.EventID]memory.EventReference{
+		"chain-2": {Key: "chain-2", PartitionID: memory.PartitionIDFromName("agent-a")},
+	}
+	for _, failure := range []error{ledger.ErrArchiveMissing, ledger.ErrArchiveCorrupt} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			tool := &traceTool{base: newBase(Reads{Table: &traceChainTable{events: items}, Trace: traceErrorParents{err: failure}}, []string{"agent-a"})}
+			answered, err := tool.Call(context.Background(), []byte(`{"key":"chain-2"}`))
+			if !errors.Is(err, failure) || answered != nil {
+				t.Fatalf("the archive-failed trace answered (%v, %v), want the named failure", answered, err)
+			}
+		})
+	}
+	relation := errors.New("relation read failed")
+	tool := &traceTool{base: newBase(Reads{Table: &traceChainTable{events: items}, Trace: traceErrorParents{err: relation}}, []string{"agent-a"})}
+	answered, err := tool.Call(context.Background(), []byte(`{"key":"chain-2"}`))
+	if err != nil {
+		t.Fatalf("the ordinary relation failure returned an error: %v", err)
+	}
+	var answer traceAnswer
+	if err := json.Unmarshal([]byte(answered.(string)), &answer); err != nil {
+		t.Fatalf("decode the relation-failure answer: %v", err)
+	}
+	if answer.Reason != reasonRelationError {
+		t.Fatalf("the ordinary relation failure answered %+v, want reason %q", answer, reasonRelationError)
+	}
+	missing := &traceTool{base: newBase(Reads{
+		Table: &traceChainTable{events: items},
+		Trace: &traceChainParents{parent: map[event.EventID]event.EventID{"chain-2": "absent-parent"}},
+	}, []string{"agent-a"})}
+	answered, err = missing.Call(context.Background(), []byte(`{"key":"chain-2"}`))
+	if err != nil {
+		t.Fatalf("the missing ancestor returned an error: %v", err)
+	}
+	if err := json.Unmarshal([]byte(answered.(string)), &answer); err != nil {
+		t.Fatalf("decode the missing-ancestor answer: %v", err)
+	}
+	if answer.Reason != reasonMissingAncestor {
+		t.Fatalf("the missing ancestor answered %+v, want reason %q", answer, reasonMissingAncestor)
+	}
+}
+
 // TestTraceOfDepthDPaysDLocalLookupsNotDHistoryWalks pins what one causal walk pays.
 //   - a chain of twelve facts answers twelve table lookups and twelve parent lookups, one of each per fact the answer carries
 //   - negative: a step that read the chain instead of its own fact answers more lookups than the depth, and the count names both beside the depth

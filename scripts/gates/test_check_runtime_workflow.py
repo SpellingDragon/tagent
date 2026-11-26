@@ -725,6 +725,21 @@ def assert_required_always_needs_all_three(workflow):
             "found {!r}".format(needs))
 
 
+def assert_archive_preflight_needs_producers(workflow):
+    preflight = ci_jobs(workflow).get("archive-preflight")
+    if preflight is None:
+        raise AssertionError("ci.yml is missing the archive-preflight job")
+    if preflight.get("if") != "always()":
+        raise AssertionError("archive-preflight must run with if: always()")
+    needs = preflight.get("needs") or []
+    if isinstance(needs, str):
+        needs = [needs]
+    if sorted(needs) != sorted(EVENT_PRODUCER_JOBS):
+        raise AssertionError(
+            "archive-preflight needs must be exactly the three producers so it "
+            "runs beside event-integrity-required, found {!r}".format(needs))
+
+
 def assert_required_download_covers_producer_artifacts(workflow):
     """Every producer artifact must land inside the summary's download glob."""
     required = ci_jobs(workflow)["event-integrity-required"]
@@ -829,8 +844,15 @@ def assert_required_skeleton(workflow):
 def assert_race_covers_affected_packages(workflow):
     race = ci_jobs(workflow)["race"]
     command = run_with(race, "race_check.sh")
-    tokens = command.split()
-    missing = [package for package in RACE_PACKAGES if package not in tokens]
+    if "--shard" not in command:
+        raise AssertionError("the race matrix must invoke race_check.sh with --shard")
+    result = subprocess.run(
+        ["bash", str(RACE_SCRIPT), "--shard-union-check"],
+        cwd=REPO, text=True, capture_output=True, check=False)
+    if result.returncode != 0:
+        raise AssertionError("race shard union check failed: {}".format(result.stderr.strip()))
+    patterns = {line.strip() for line in result.stdout.splitlines() if line.strip().startswith(".")}
+    missing = [package for package in RACE_PACKAGES if package not in patterns]
     if missing:
         raise AssertionError(
             "race package set is missing {}: the set is mapped from every modified "
@@ -1104,6 +1126,17 @@ class CiWorkflowTest(unittest.TestCase):
         self.assertEqual(required.get("if"), "always()")
         self.assertEqual(sorted(required.get("needs") or []),
                          sorted(EVENT_PRODUCER_JOBS))
+
+    def test_archive_preflight_runs_beside_required_aggregate(self):
+        assert_archive_preflight_needs_producers(self.workflow)
+        preflight = ci_jobs(self.workflow)["archive-preflight"]
+        self.assertNotIn("event-integrity-required", preflight.get("needs") or [])
+
+    def test_archive_preflight_serial_dependency_turns_red(self):
+        mutated = copy.deepcopy(self.workflow)
+        mutated["jobs"]["archive-preflight"]["needs"] = ["event-integrity-required"]
+        with self.assertRaises(AssertionError):
+            assert_archive_preflight_needs_producers(mutated)
 
     def test_required_downloads_and_uses_same_checker(self):
         download = assert_required_download_covers_producer_artifacts(self.workflow)

@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -38,13 +39,346 @@ type storedRefFixture struct {
 	Length          int64     `json:"length"`
 }
 
-// TestRecoverOrphanOriginalsRebuildsFromChain pins the rebuild of one orphan reference from the chain event of its key.
-//   - the seeded root is the state the boot loader refuses by name
-//   - the dry run reports the reference recoverable with its first owner and writes no byte
-//   - --restore commits the body, the reopened root boots, and the reference record stays byte for byte as it was committed
+// TestVerifyReferencesFreshRootWithoutBlobIsAligned pins the root the runtime writes today as the state the scan clears.
+//   - the fact lands through the whole-fact commit, so the reference is staged alone and the text lives inside the event body
+//   - the root holds no independent body, yet the scan reports no truly lost and no mismatched reference and exits 0
+//   - the scan writes no byte and the recall serves the exact text out of the event body
 //
 // 契约: docs/wiki/memory/memory-architecture.md#event-shape
-func TestRecoverOrphanOriginalsRebuildsFromChain(t *testing.T) {
+func TestVerifyReferencesFreshRootWithoutBlobIsAligned(t *testing.T) {
+	ctx := context.Background()
+	const key = "1408-9f2c1d3e4b5a60718293a4b5c6d7e8f9"
+	const content = "the text the event body carries"
+	evt := chainEvent(key, content)
+	tier, root := seedRoot(t, ctx)
+	commitFact(t, ctx, tier, evt, content, 1)
+	closeSeeded(t, tier)
+	if held := blobKeysOf(t, ctx, root); len(held) != 0 {
+		t.Fatalf("the whole-fact commit staged the independent bodies %v, want none", held)
+	}
+	before := rootFiles(t, root)
+
+	scanned, err := verifyOriginalReferences(ctx, root, "")
+	if err != nil {
+		t.Fatalf("the scan of the fresh root %s returned %v", root, err)
+	}
+	if len(scanned.TrulyLost) != 0 || len(scanned.Mismatch) != 0 {
+		t.Fatalf("the scan of the fresh root = %+v, want no truly lost and no mismatched reference", scanned)
+	}
+	if scanned.exitCode() != 0 {
+		t.Fatalf("the scan exit code = %d, want 0: the event body answers the reference", scanned.exitCode())
+	}
+	assertRootUnchanged(t, root, before)
+	got := openRoot(t, ctx, root).Originals.Get(ctx, event.EventID(key))
+	if got.Outcome != ledger.RecallFound || !bytes.Equal(got.Body, []byte(content)) {
+		t.Fatalf("the recall of the fresh root = %+v, want the exact text %q", got, content)
+	}
+}
+
+// TestRecoverKVVerifiesArchivedReferencesByIdentity pins the scan over a root whose chain keys moved.
+//   - the reference is answered by the text the archive holds, so the scan reports no truly lost and no mismatched reference and exits 0
+//   - the same root read without the archive root reports the reference truly lost, so the answer comes through the archive locator
+//   - an archived segment the manifest states and the archive lost is reported as ErrArchiveMissing, never as a truly lost reference
+//   - neither scan writes a byte of the hot root or the archive root
+//
+// 契约: docs/wiki/memory/memory-architecture.md#event-shape
+func TestRecoverKVVerifiesArchivedReferencesByIdentity(t *testing.T) {
+	ctx := context.Background()
+	const key = "1408-2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e"
+	const content = "the text the archived segment carries"
+	owner := event.Address{AgentID: "agent-a", SessionID: "session-a"}
+	hotRoot, archiveRoot := archivedReferenceFixture(t, ctx, key, content, owner)
+
+	hotOnly, err := verifyOriginalReferences(ctx, hotRoot, "")
+	if err != nil {
+		t.Fatalf("the scan of the hot root alone returned %v", err)
+	}
+	if got := referenceKeys(hotOnly.TrulyLost); !reflect.DeepEqual(got, []string{key}) {
+		t.Fatalf("the truly lost keys of the hot root alone = %v, want the key %q the archive carries", got, key)
+	}
+
+	beforeHot := rootFiles(t, hotRoot)
+	beforeArchive := rootFiles(t, archiveRoot)
+	scanned, err := verifyOriginalReferences(ctx, hotRoot, archiveRoot)
+	if err != nil {
+		t.Fatalf("the scan over %s beside %s returned %v", hotRoot, archiveRoot, err)
+	}
+	if len(scanned.TrulyLost) != 0 || len(scanned.Mismatch) != 0 {
+		t.Fatalf("the scan beside the archive = %+v, want no truly lost and no mismatched reference", scanned)
+	}
+	if scanned.exitCode() != 0 {
+		t.Fatalf("the scan exit code = %d, want 0: the archived body answers the reference", scanned.exitCode())
+	}
+	assertRootUnchanged(t, hotRoot, beforeHot)
+	assertRootUnchanged(t, archiveRoot, beforeArchive)
+
+	lost := filepath.Join(archiveRoot, archiveSegmentDirectory, archivedSegmentLabelOf(t, archiveRoot)+archiveSegmentLogSuffix)
+	if err := os.Remove(lost); err != nil {
+		t.Fatalf("remove the archived segment %s: %v", lost, err)
+	}
+	if _, err := verifyOriginalReferences(ctx, hotRoot, archiveRoot); !errors.Is(err, ledger.ErrArchiveMissing) {
+		t.Fatalf("the scan beside an archive missing a stated segment returned %v, want ErrArchiveMissing", err)
+	}
+}
+
+// archivedReferenceFixture builds the state one archived reference lives in: a
+// source root whose chain keys one cut seals, an archive root stating that interval,
+// and a hot root holding the reference beside the seat that names its partition.
+func archivedReferenceFixture(t *testing.T, ctx context.Context, key, content string, owner event.Address) (string, string) {
+	t.Helper()
+	sourceRoot, archiveRoot := t.TempDir(), t.TempDir()
+	config := ledger.StorageConfig{Type: ledger.StorageJournal, Root: sourceRoot, WriteRights: true}
+	config.HotLogMaxBytes = archivedSegmentBudget
+	config.ArchiveRoot = archiveRoot
+	source, err := ledger.OpenTier(ctx, config)
+	if err != nil {
+		t.Fatalf("open the source root %s: %v", sourceRoot, err)
+	}
+	commitChainEvent(t, ctx, source, chainEvent(key, content), 1)
+	commitPairs(t, ctx, source, ledger.Pair{Key: "checkpoint:1:1", Value: []byte("cut")})
+	closeSeeded(t, source)
+
+	archiveSealedInterval(t, sourceRoot, archiveRoot)
+
+	hot, hotRoot := seedRoot(t, ctx)
+	partition := memory.PartitionIDFromName(string(owner.AgentID))
+	seat, err := json.Marshal(map[string]any{"count": 1, "commitSeq": 2, "partitions": []int{partition}})
+	if err != nil {
+		t.Fatalf("state the chain seat: %v", err)
+	}
+	commitPairs(t, ctx, hot,
+		ledger.Pair{Key: "store:seat", Value: seat},
+		ledger.Pair{Key: "ref:" + key, Value: refJSON(t, []storedRefFixture{refFixture([]byte(content), owner)})})
+	closeSeeded(t, hot)
+	return hotRoot, archiveRoot
+}
+
+// archiveSealedInterval copies the one interval the source root sealed into a fresh
+// archive root and states it in both manifest slots.
+func archiveSealedInterval(t *testing.T, sourceRoot, archiveRoot string) {
+	t.Helper()
+	segmentsDir := filepath.Join(sourceRoot, kvDirectory, archiveSegmentDirectory)
+	names, err := os.ReadDir(segmentsDir)
+	if err != nil {
+		t.Fatalf("read the sealed intervals of %s: %v", sourceRoot, err)
+	}
+	label := ""
+	for _, entry := range names {
+		if strings.HasSuffix(entry.Name(), archiveSegmentLogSuffix) {
+			label = strings.TrimSuffix(entry.Name(), archiveSegmentLogSuffix)
+			break
+		}
+	}
+	if label == "" {
+		t.Fatalf("the source root %s holds no sealed interval", sourceRoot)
+	}
+	target := filepath.Join(archiveRoot, archiveSegmentDirectory)
+	segmentBytes := copyArchiveFile(t, filepath.Join(segmentsDir, label+archiveSegmentLogSuffix),
+		filepath.Join(target, label+archiveSegmentLogSuffix))
+	indexBytes := copyArchiveFile(t, filepath.Join(segmentsDir, label+archiveSegmentIndexSuffix),
+		filepath.Join(target, label+archiveSegmentIndexSuffix))
+	header := archiveSegmentHeaderFixtureOf(t, segmentBytes)
+	keys, offsetOf := archiveSegmentIndexOf(t, indexBytes)
+	keySet, err := json.Marshal(keys)
+	if err != nil {
+		t.Fatalf("state the key set of %s: %v", label, err)
+	}
+	cutKey := "checkpoint:" + strconv.Itoa(header.CutPartition) + ":" + strconv.FormatInt(header.CutSeq, 10)
+	cutOffset, found := offsetOf[cutKey]
+	if !found {
+		t.Fatalf("the sealed interval %s states its cut at partition %d seq %d in no checkpoint key",
+			label, header.CutPartition, header.CutSeq)
+	}
+	manifest := archiveManifestFixture{
+		Version:    1,
+		Generation: 1,
+		Segments: []archiveSegmentFixture{{
+			SegmentID: label,
+			KeyDomain: archiveKeyDomainFixture{
+				Partition: header.CutPartition,
+				FirstKey:  keys[0],
+				LastKey:   keys[len(keys)-1],
+				KeysSHA:   digestOf(keySet),
+			},
+			Bytes:  int64(len(segmentBytes)),
+			SHA256: digestOf(segmentBytes),
+			Cut:    archiveCutFixture{Partition: header.CutPartition, Seq: header.CutSeq, FrameOffset: cutOffset},
+			OffsetMap: archiveOffsetMapFixture{
+				FirstSeq:    header.FirstSeq,
+				LastSeq:     header.LastSeq,
+				FrameCount:  len(keys),
+				IndexPath:   label + archiveSegmentIndexSuffix,
+				IndexSHA256: digestOf(indexBytes),
+			},
+		}},
+		ArchivedThroughCut: archiveCutFixture{Partition: header.CutPartition, Seq: header.CutSeq},
+	}
+	body, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("state the archive manifest: %v", err)
+	}
+	for _, name := range []string{archiveManifestAName, archiveManifestBName} {
+		if err := os.WriteFile(filepath.Join(archiveRoot, name), body, 0o600); err != nil {
+			t.Fatalf("write the manifest slot %s: %v", name, err)
+		}
+	}
+}
+
+// archivedSegmentLabelOf answers the label of the one interval an archive root states.
+func archivedSegmentLabelOf(t *testing.T, archiveRoot string) string {
+	t.Helper()
+	names, err := os.ReadDir(filepath.Join(archiveRoot, archiveSegmentDirectory))
+	if err != nil {
+		t.Fatalf("read the archived intervals of %s: %v", archiveRoot, err)
+	}
+	for _, entry := range names {
+		if strings.HasSuffix(entry.Name(), archiveSegmentLogSuffix) {
+			return strings.TrimSuffix(entry.Name(), archiveSegmentLogSuffix)
+		}
+	}
+	t.Fatalf("the archive root %s holds no segment file", archiveRoot)
+	return ""
+}
+
+// copyArchiveFile copies one file into the archive root and answers the bytes it copies.
+func copyArchiveFile(t *testing.T, source, target string) []byte {
+	t.Helper()
+	raw, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatalf("read %s: %v", source, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatalf("open the archive directory %s: %v", filepath.Dir(target), err)
+	}
+	if err := os.WriteFile(target, raw, 0o600); err != nil {
+		t.Fatalf("write %s: %v", target, err)
+	}
+	return raw
+}
+
+// archiveSegmentHeaderFixtureOf answers the header one framed segment file states.
+func archiveSegmentHeaderFixtureOf(t *testing.T, raw []byte) archiveSegmentHeaderFixture {
+	t.Helper()
+	var header archiveSegmentHeaderFixture
+	if err := json.Unmarshal(framedPayloadOf(t, raw), &header); err != nil {
+		t.Fatalf("decode the segment header: %v", err)
+	}
+	return header
+}
+
+// archiveSegmentIndexOf answers the keys one framed segment index states, in key
+// order, beside the byte each key's newest frame starts at.
+func archiveSegmentIndexOf(t *testing.T, raw []byte) ([]string, map[string]int64) {
+	t.Helper()
+	var index struct {
+		Entries []struct {
+			Key    string `json:"key"`
+			Offset int64  `json:"offset"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(framedPayloadOf(t, raw), &index); err != nil {
+		t.Fatalf("decode the segment index: %v", err)
+	}
+	if len(index.Entries) == 0 {
+		t.Fatalf("the segment index states no key")
+	}
+	keys := make([]string, 0, len(index.Entries))
+	offsetOf := make(map[string]int64, len(index.Entries))
+	for _, entry := range index.Entries {
+		keys = append(keys, entry.Key)
+		offsetOf[entry.Key] = entry.Offset
+	}
+	sort.Strings(keys)
+	return keys, offsetOf
+}
+
+// framedPayloadOf answers the JSON payload one framed file carries at its front.
+func framedPayloadOf(t *testing.T, raw []byte) []byte {
+	t.Helper()
+	if len(raw) < 8 {
+		t.Fatalf("the framed file holds %d byte(s), shorter than a frame header", len(raw))
+	}
+	length := int(binary.BigEndian.Uint32(raw[0:4]))
+	if length < 1 || len(raw) < 8+length {
+		t.Fatalf("the framed file declares %d payload byte(s) and carries %d", length, len(raw)-8)
+	}
+	return raw[8 : 8+length]
+}
+
+// archivedSegmentBudget is the hot log budget the source root seals one interval beside.
+const archivedSegmentBudget = 1 << 20
+
+// archiveSegmentDirectory names the segment directory under an archive root, beside
+// the two manifest slots and the suffixes of one segment and its index.
+const (
+	archiveSegmentDirectory   = "segments"
+	archiveManifestAName      = "manifest.a"
+	archiveManifestBName      = "manifest.b"
+	archiveSegmentLogSuffix   = ".log"
+	archiveSegmentIndexSuffix = ".idx"
+)
+
+// archiveManifestFixture is one manifest generation as these cases state it: the same
+// documented fields the journal writes, so the reader resolves a statement no writer
+// in this package produced.
+type archiveManifestFixture struct {
+	Version            int                     `json:"version"`
+	Generation         int                     `json:"generation"`
+	Segments           []archiveSegmentFixture `json:"segments"`
+	ArchivedThroughCut archiveCutFixture       `json:"archived_through_cut"`
+}
+
+// archiveSegmentFixture is one archived segment as the manifest states it.
+type archiveSegmentFixture struct {
+	SegmentID string                  `json:"segment_id"`
+	KeyDomain archiveKeyDomainFixture `json:"key_domain"`
+	Bytes     int64                   `json:"bytes"`
+	SHA256    string                  `json:"sha256"`
+	Cut       archiveCutFixture       `json:"cut"`
+	OffsetMap archiveOffsetMapFixture `json:"offset_map"`
+}
+
+// archiveKeyDomainFixture is the conservative interval one segment answers.
+type archiveKeyDomainFixture struct {
+	Partition int    `json:"partition"`
+	FirstKey  string `json:"first_key"`
+	LastKey   string `json:"last_key"`
+	KeysSHA   string `json:"keys_sha256"`
+}
+
+// archiveCutFixture is the cut one segment boundary closed at.
+type archiveCutFixture struct {
+	Partition   int   `json:"partition"`
+	Seq         int64 `json:"seq"`
+	FrameOffset int64 `json:"frame_offset"`
+}
+
+// archiveOffsetMapFixture states where the index of one segment lives and what it digests to.
+type archiveOffsetMapFixture struct {
+	FirstSeq    int64  `json:"first_seq"`
+	LastSeq     int64  `json:"last_seq"`
+	FrameCount  int    `json:"frame_count"`
+	IndexPath   string `json:"index_path"`
+	IndexSHA256 string `json:"index_sha256"`
+}
+
+// archiveSegmentHeaderFixture is the header one sealed segment states about itself.
+type archiveSegmentHeaderFixture struct {
+	SegmentID    string `json:"segment_id"`
+	FirstSeq     int64  `json:"first_seq"`
+	LastSeq      int64  `json:"last_seq"`
+	CutPartition int    `json:"cut_partition"`
+	CutSeq       int64  `json:"cut_seq"`
+	Bytes        int64  `json:"bytes"`
+}
+
+// TestVerifyReferencesLostBlobIsReadBackFromTheEventBody pins a lost independent body as a root the scan clears.
+//   - the reference was registered under two scopes and the chain still holds the text
+//   - the scan reports neither class and exits 0, and the recall serves the exact text
+//   - the scan writes no byte, so the body stays out of the root it was lost from
+//
+// 契约: docs/wiki/memory/memory-architecture.md#event-shape
+func TestVerifyReferencesLostBlobIsReadBackFromTheEventBody(t *testing.T) {
 	ctx := context.Background()
 	const key = "1408-d87b587dc0a350d14b98763f8f14748c"
 	const content = "the body the chain still holds"
@@ -53,103 +387,36 @@ func TestRecoverOrphanOriginalsRebuildsFromChain(t *testing.T) {
 	commitChainEvent(t, ctx, tier, evt, 1)
 	joined := event.Address{AgentID: evt.Owner.AgentID, SessionID: "session-b"}
 	records := []storedRefFixture{refFixture([]byte(content), evt.Owner), refFixture([]byte(content), joined)}
-	refValue := refJSON(t, records)
-	commitPairs(t, ctx, tier, ledger.Pair{Key: "ref:" + key, Value: refValue})
-	closeSeeded(t, tier)
-	assertBootRefuses(t, ctx, root, key)
-	before := rootFiles(t, root)
-
-	dry, err := recoverOrphanOriginals(ctx, root, false)
-	if err != nil {
-		t.Fatalf("the dry run over %s returned %v", root, err)
-	}
-	want := orphan{Key: key, OwnerAgent: string(evt.Owner.AgentID), OwnerSession: string(evt.Owner.SessionID)}
-	if len(dry.Recoverable) != 1 || dry.Recoverable[0] != want {
-		t.Fatalf("the dry run report = %+v, want the one recoverable reference %+v", dry, want)
-	}
-	if len(dry.Restored) != 0 || len(dry.TrulyLost) != 0 || len(dry.Mismatch) != 0 {
-		t.Fatalf("the dry run report = %+v, want no other class", dry)
-	}
-	if dry.exitCode() != 0 {
-		t.Fatalf("the dry run exit code = %d, want 0", dry.exitCode())
-	}
-	assertRootUnchanged(t, root, before)
-	if held := blobKeysOf(t, ctx, root); len(held) != 0 {
-		t.Fatalf("the dry run wrote the bodies %v, want none", held)
-	}
-
-	restored, err := recoverOrphanOriginals(ctx, root, true)
-	if err != nil {
-		t.Fatalf("the restore over %s returned %v", root, err)
-	}
-	if len(restored.Restored) != 1 || restored.Restored[0] != want {
-		t.Fatalf("the restore report = %+v, want the one restored reference %+v", restored, want)
-	}
-	if len(restored.Recoverable) != 0 || len(restored.TrulyLost) != 0 || len(restored.Mismatch) != 0 {
-		t.Fatalf("the restore report = %+v, want no other class", restored)
-	}
-	if restored.exitCode() != 0 {
-		t.Fatalf("the restore exit code = %d, want 0", restored.exitCode())
-	}
-	reopened := openRoot(t, ctx, root)
-	got := reopened.Originals.Get(ctx, event.EventID(key))
-	if got.Outcome != ledger.RecallFound || !bytes.Equal(got.Body, []byte(content)) {
-		t.Fatalf("the recall of the restored root = %+v, want the exact body %q", got, content)
-	}
-	refPairs, err := reopened.Store.Read(ctx, ledger.Fetch{Key: "ref:" + key})
-	if err != nil {
-		t.Fatalf("read the reference of %s: %v", key, err)
-	}
-	if len(refPairs) != 1 || !bytes.Equal(refPairs[0].Value, refValue) {
-		t.Fatalf("the restored root holds the reference records %v, want the one record byte for byte as it was committed", refPairs)
-	}
-	if held := blobKeysOf(t, ctx, root); !reflect.DeepEqual(held, []string{"blob:" + key}) {
-		t.Fatalf("the restored root holds the bodies %v, want only blob:%s", held, key)
-	}
-}
-
-// TestRecoverOrphanOriginalsTrulyLost pins the refusal to invent a body the chain does not hold.
-//   - the reference is reported truly lost by name with its owner and the exit code is nonzero
-//   - --restore writes no byte: the reference stays as it was, no body appears, and the root still refuses to boot
-//
-// 契约: docs/wiki/memory/memory-architecture.md#event-shape
-func TestRecoverOrphanOriginalsTrulyLost(t *testing.T) {
-	ctx := context.Background()
-	const key = "1408-0000000000000000000000000000dead"
-	owner := event.Address{AgentID: "agent-lost", SessionID: "session-lost"}
-	tier, root := seedRoot(t, ctx)
-	records := []storedRefFixture{refFixture([]byte("the body no chain event holds"), owner)}
 	commitPairs(t, ctx, tier, ledger.Pair{Key: "ref:" + key, Value: refJSON(t, records)})
 	closeSeeded(t, tier)
 	before := rootFiles(t, root)
 
-	scanned, err := recoverOrphanOriginals(ctx, root, true)
+	scanned, err := verifyOriginalReferences(ctx, root, "")
 	if err != nil {
-		t.Fatalf("the restore over %s returned %v", root, err)
+		t.Fatalf("the scan over %s returned %v", root, err)
 	}
-	want := orphan{Key: key, OwnerAgent: string(owner.AgentID), OwnerSession: string(owner.SessionID)}
-	if len(scanned.TrulyLost) != 1 || scanned.TrulyLost[0] != want {
-		t.Fatalf("the report = %+v, want the truly lost reference %+v", scanned, want)
+	if len(scanned.TrulyLost) != 0 || len(scanned.Mismatch) != 0 {
+		t.Fatalf("the scan of a root whose body is lost = %+v, want no truly lost and no mismatched reference", scanned)
 	}
-	if len(scanned.Restored) != 0 || len(scanned.Recoverable) != 0 || len(scanned.Mismatch) != 0 {
-		t.Fatalf("the report = %+v, want no other class", scanned)
-	}
-	if scanned.exitCode() != 1 {
-		t.Fatalf("the exit code = %d, want 1 for a root that still cannot boot", scanned.exitCode())
+	if scanned.exitCode() != 0 {
+		t.Fatalf("the scan exit code = %d, want 0: the event body answers both references", scanned.exitCode())
 	}
 	assertRootUnchanged(t, root, before)
 	if held := blobKeysOf(t, ctx, root); len(held) != 0 {
-		t.Fatalf("the scan wrote the bodies %v, want none", held)
+		t.Fatalf("the scan staged the bodies %v, want none", held)
 	}
-	assertBootRefuses(t, ctx, root, key)
+	got := openRoot(t, ctx, root).Originals.Get(ctx, event.EventID(key))
+	if got.Outcome != ledger.RecallFound || !bytes.Equal(got.Body, []byte(content)) {
+		t.Fatalf("the recall of a root whose body is lost = %+v, want the exact text %q", got, content)
+	}
 }
 
-// TestRecoverOrphanOriginalsDigestMismatch pins the refusal to write a body the reference does not name.
-//   - a digest of other bytes and a length of other bytes are both reported mismatch by name
-//   - --restore writes no byte in either case and the exit code stays nonzero
+// TestVerifyReferencesDigestMismatchIsNamed pins the named report of a copy the records do not name.
+//   - a digest of other bytes and a length of other bytes are both reported a mismatch by name
+//   - the exit code of either is 1, and the scan writes no byte
 //
 // 契约: docs/wiki/memory/memory-architecture.md#event-shape
-func TestRecoverOrphanOriginalsDigestMismatch(t *testing.T) {
+func TestVerifyReferencesDigestMismatchIsNamed(t *testing.T) {
 	ctx := context.Background()
 	const key = "1408-0000000000000000000000000000beef"
 	const content = "the body the chain holds"
@@ -172,72 +439,120 @@ func TestRecoverOrphanOriginalsDigestMismatch(t *testing.T) {
 			closeSeeded(t, tier)
 			before := rootFiles(t, root)
 
-			scanned, err := recoverOrphanOriginals(ctx, root, true)
+			scanned, err := verifyOriginalReferences(ctx, root, "")
 			if err != nil {
-				t.Fatalf("the restore over %s returned %v", root, err)
+				t.Fatalf("the scan over %s returned %v", root, err)
 			}
-			want := orphan{Key: key, OwnerAgent: string(owner.AgentID), OwnerSession: string(owner.SessionID)}
+			want := reference{Key: key, OwnerAgent: string(owner.AgentID), OwnerSession: string(owner.SessionID)}
 			if len(scanned.Mismatch) != 1 || scanned.Mismatch[0] != want {
 				t.Fatalf("the report = %+v, want the mismatched reference %+v", scanned, want)
 			}
-			if len(scanned.Restored) != 0 || len(scanned.Recoverable) != 0 || len(scanned.TrulyLost) != 0 {
-				t.Fatalf("the report = %+v, want no other class", scanned)
+			if len(scanned.TrulyLost) != 0 {
+				t.Fatalf("the report = %+v, want no truly lost reference", scanned)
 			}
 			if scanned.exitCode() != 1 {
-				t.Fatalf("the exit code = %d, want 1 for a root that still cannot boot", scanned.exitCode())
+				t.Fatalf("the exit code = %d, want 1 for a reference the chain does not answer", scanned.exitCode())
 			}
 			assertRootUnchanged(t, root, before)
-			if held := blobKeysOf(t, ctx, root); len(held) != 0 {
-				t.Fatalf("the scan wrote the bodies %v, want none", held)
+			got := openRoot(t, ctx, root).Originals.Get(ctx, event.EventID(key))
+			if got.Outcome != ledger.RecallFailed || !errors.Is(got.Err, ledger.ErrIntegrityMismatch) {
+				t.Fatalf("the recall of the mismatched root = %+v, want the named integrity refusal", got)
 			}
-			assertBootRefuses(t, ctx, root, key)
 		})
 	}
 }
 
-// TestRecoverOrphanOriginalsPairedRoot pins the parity of a root whose every reference names its body.
-//   - the dry run and the restore both report nothing to recover and exit 0
-//   - neither writes a byte, and the root recalls the body it already held
+// TestVerifyReferencesWithoutEventIsTrulyLost pins the reference that no copy of the root answers.
+//   - the reference is reported truly lost by name with its owner, and the exit code is 1
+//   - the scan writes no byte and the recall keeps refusing that reference by name
 //
 // 契约: docs/wiki/memory/memory-architecture.md#event-shape
-func TestRecoverOrphanOriginalsPairedRoot(t *testing.T) {
+func TestVerifyReferencesWithoutEventIsTrulyLost(t *testing.T) {
 	ctx := context.Background()
-	const key = "1408-0000000000000000000000000000face"
-	const content = "the body already paired with its reference"
+	const key = "1408-0000000000000000000000000000dead"
+	owner := event.Address{AgentID: "agent-lost", SessionID: "session-lost"}
 	tier, root := seedRoot(t, ctx)
-	evt := chainEvent(key, content)
-	commitChainEvent(t, ctx, tier, evt, 1)
-	commitPairs(t, ctx, tier,
-		ledger.Pair{Key: "blob:" + key, Value: []byte(content)},
-		ledger.Pair{Key: "ref:" + key, Value: refJSON(t, []storedRefFixture{refFixture([]byte(content), evt.Owner)})})
+	commitPairs(t, ctx, tier, ledger.Pair{Key: "ref:" + key, Value: refJSON(t, []storedRefFixture{refFixture([]byte("the body no copy holds"), owner)})})
 	closeSeeded(t, tier)
 	before := rootFiles(t, root)
 
-	for _, restore := range []bool{false, true} {
-		scanned, err := recoverOrphanOriginals(ctx, root, restore)
-		if err != nil {
-			t.Fatalf("the scan of the paired root (restore=%t) returned %v", restore, err)
-		}
-		if len(scanned.Recoverable)+len(scanned.Restored)+len(scanned.TrulyLost)+len(scanned.Mismatch) != 0 {
-			t.Fatalf("the scan of the paired root (restore=%t) = %+v, want nothing to recover", restore, scanned)
-		}
-		if scanned.exitCode() != 0 {
-			t.Fatalf("the exit code of the paired root (restore=%t) = %d, want 0", restore, scanned.exitCode())
-		}
+	scanned, err := verifyOriginalReferences(ctx, root, "")
+	if err != nil {
+		t.Fatalf("the scan over %s returned %v", root, err)
+	}
+	want := reference{Key: key, OwnerAgent: string(owner.AgentID), OwnerSession: string(owner.SessionID)}
+	if len(scanned.TrulyLost) != 1 || scanned.TrulyLost[0] != want {
+		t.Fatalf("the report = %+v, want the truly lost reference %+v", scanned, want)
+	}
+	if len(scanned.Mismatch) != 0 {
+		t.Fatalf("the report = %+v, want no mismatched reference", scanned)
+	}
+	if scanned.exitCode() != 1 {
+		t.Fatalf("the exit code = %d, want 1 for a reference no copy answers", scanned.exitCode())
 	}
 	assertRootUnchanged(t, root, before)
-	reopened := openRoot(t, ctx, root)
-	if got := reopened.Originals.Get(ctx, event.EventID(key)); got.Outcome != ledger.RecallFound || !bytes.Equal(got.Body, []byte(content)) {
-		t.Fatalf("the recall of the paired root = %+v, want the exact body %q", got, content)
+	if held := blobKeysOf(t, ctx, root); len(held) != 0 {
+		t.Fatalf("the scan wrote the bodies %v, want none", held)
+	}
+	assertRecallRefuses(t, ctx, root, key)
+}
+
+// TestVerifyReferencesBlobDriftIsNamed pins an independent body an old root keeps as a copy held to the same account.
+//   - a body equal to the recorded bytes is not reported, and the root exits 0
+//   - a body of other bytes is reported a mismatch by name whatever the chain holds, and the exit code is 1
+//
+// 契约: docs/wiki/memory/memory-architecture.md#event-shape
+func TestVerifyReferencesBlobDriftIsNamed(t *testing.T) {
+	ctx := context.Background()
+	const key = "1408-0000000000000000000000000000face"
+	const content = "the body the reference names"
+	owner := event.Address{AgentID: "agent-a", SessionID: "session-a"}
+	cases := []struct {
+		name   string
+		staged []byte
+		want   []reference
+	}{
+		{name: "matching", staged: []byte(content)},
+		{name: "drifted", staged: []byte("another body the root staged"), want: []reference{{Key: key, OwnerAgent: string(owner.AgentID), OwnerSession: string(owner.SessionID)}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tier, root := seedRoot(t, ctx)
+			commitChainEvent(t, ctx, tier, chainEvent(key, content), 1)
+			commitPairs(t, ctx, tier,
+				ledger.Pair{Key: "blob:" + key, Value: tc.staged},
+				ledger.Pair{Key: "ref:" + key, Value: refJSON(t, []storedRefFixture{refFixture([]byte(content), owner)})})
+			closeSeeded(t, tier)
+			before := rootFiles(t, root)
+
+			scanned, err := verifyOriginalReferences(ctx, root, "")
+			if err != nil {
+				t.Fatalf("the scan over %s returned %v", root, err)
+			}
+			if len(scanned.TrulyLost) != 0 {
+				t.Fatalf("the report = %+v, want no truly lost reference", scanned)
+			}
+			if !reflect.DeepEqual(scanned.Mismatch, tc.want) {
+				t.Fatalf("the mismatched references = %v, want %v", scanned.Mismatch, tc.want)
+			}
+			wantCode := 0
+			if len(tc.want) > 0 {
+				wantCode = 1
+			}
+			if scanned.exitCode() != wantCode {
+				t.Fatalf("the exit code = %d, want %d", scanned.exitCode(), wantCode)
+			}
+			assertRootUnchanged(t, root, before)
+		})
 	}
 }
 
-// TestRecoverOrphanOriginalsSortedOrder pins the key order of every class across repeated scans of one root.
+// TestVerifyReferencesSortedOrder pins the key order of every class across repeated scans of one root.
 //   - the references are committed out of key order and each class comes back in key order
-//   - ten dry runs report one identical report, and the restore commits the rebuildable keys in that same order
+//   - ten scans report one identical report
 //
 // 契约: docs/wiki/memory/memory-architecture.md#event-shape
-func TestRecoverOrphanOriginalsSortedOrder(t *testing.T) {
+func TestVerifyReferencesSortedOrder(t *testing.T) {
 	ctx := context.Background()
 	owner := event.Address{AgentID: "agent-a", SessionID: "session-a"}
 	tier, root := seedRoot(t, ctx)
@@ -263,66 +578,41 @@ func TestRecoverOrphanOriginalsSortedOrder(t *testing.T) {
 	}
 	closeSeeded(t, tier)
 	before := rootFiles(t, root)
-	wantRecoverable := []string{"1408-cccc", "1408-dddd"}
 	wantLost := []string{"1408-aaaa", "1408-eeee"}
 	wantMismatch := []string{"1408-bbbb"}
 
 	var first report
 	for run := 0; run < 10; run++ {
-		scanned, err := recoverOrphanOriginals(ctx, root, false)
+		scanned, err := verifyOriginalReferences(ctx, root, "")
 		if err != nil {
-			t.Fatalf("dry run %d over %s returned %v", run, root, err)
+			t.Fatalf("scan %d over %s returned %v", run, root, err)
 		}
 		if run == 0 {
 			first = scanned
-			if got := orphanKeys(scanned.Recoverable); !reflect.DeepEqual(got, wantRecoverable) {
-				t.Fatalf("the recoverable keys = %v, want %v", got, wantRecoverable)
-			}
-			if got := orphanKeys(scanned.TrulyLost); !reflect.DeepEqual(got, wantLost) {
+			if got := referenceKeys(scanned.TrulyLost); !reflect.DeepEqual(got, wantLost) {
 				t.Fatalf("the truly lost keys = %v, want %v", got, wantLost)
 			}
-			if got := orphanKeys(scanned.Mismatch); !reflect.DeepEqual(got, wantMismatch) {
+			if got := referenceKeys(scanned.Mismatch); !reflect.DeepEqual(got, wantMismatch) {
 				t.Fatalf("the mismatched keys = %v, want %v", got, wantMismatch)
 			}
 			if scanned.exitCode() != 1 {
-				t.Fatalf("the exit code = %d, want 1 for a root holding unbuildable references", scanned.exitCode())
+				t.Fatalf("the exit code = %d, want 1 for a root holding unanswered references", scanned.exitCode())
 			}
 			continue
 		}
 		if !reflect.DeepEqual(scanned, first) {
-			t.Fatalf("dry run %d = %+v, want the report of the first run %+v", run, scanned, first)
+			t.Fatalf("scan %d = %+v, want the report of the first run %+v", run, scanned, first)
 		}
 	}
 	assertRootUnchanged(t, root, before)
-
-	restored, err := recoverOrphanOriginals(ctx, root, true)
-	if err != nil {
-		t.Fatalf("the restore over %s returned %v", root, err)
-	}
-	if got := orphanKeys(restored.Restored); !reflect.DeepEqual(got, wantRecoverable) {
-		t.Fatalf("the restored keys = %v, want %v", got, wantRecoverable)
-	}
-	if got := orphanKeys(restored.TrulyLost); !reflect.DeepEqual(got, wantLost) {
-		t.Fatalf("the truly lost keys after the restore = %v, want %v", got, wantLost)
-	}
-	if got := orphanKeys(restored.Mismatch); !reflect.DeepEqual(got, wantMismatch) {
-		t.Fatalf("the mismatched keys after the restore = %v, want %v", got, wantMismatch)
-	}
-	if restored.exitCode() != 1 {
-		t.Fatalf("the exit code after the restore = %d, want 1 for the references left unbuildable", restored.exitCode())
-	}
-	wantBlobs := []string{"blob:1408-cccc", "blob:1408-dddd"}
-	if held := blobKeysOf(t, ctx, root); !reflect.DeepEqual(held, wantBlobs) {
-		t.Fatalf("the restored root holds the bodies %v, want %v", held, wantBlobs)
-	}
 }
 
-// TestRecoverOrphanOriginalsUndecodableReference pins the named refusal of a reference record that states no body to rebuild.
+// TestVerifyReferencesUndecodableReference pins the named refusal of a reference record that states no text to verify.
 //   - bytes that are no JSON array and an empty array both fail naming the key
-//   - neither case writes a byte, even with --restore
+//   - neither case writes a byte
 //
 // 契约: docs/wiki/memory/memory-architecture.md#event-shape
-func TestRecoverOrphanOriginalsUndecodableReference(t *testing.T) {
+func TestVerifyReferencesUndecodableReference(t *testing.T) {
 	ctx := context.Background()
 	const key = "1408-0000000000000000000000000000abcd"
 	cases := []struct {
@@ -340,7 +630,7 @@ func TestRecoverOrphanOriginalsUndecodableReference(t *testing.T) {
 			closeSeeded(t, tier)
 			before := rootFiles(t, root)
 
-			if _, err := recoverOrphanOriginals(ctx, root, true); err == nil || !strings.Contains(err.Error(), key) {
+			if _, err := verifyOriginalReferences(ctx, root, ""); err == nil || !strings.Contains(err.Error(), key) {
 				t.Fatalf("the scan of the %s reference returned %v, want the refusal naming %s", tc.name, err, key)
 			}
 			assertRootUnchanged(t, root, before)
@@ -361,63 +651,55 @@ func TestDigestOfCanonicalForm(t *testing.T) {
 	}
 }
 
-// TestRecoverKVCommandExitCodes pins the flags and the exit status of the built command over live journal roots.
+// TestVerifyKVCommandExitCodes pins the flags and the exit status of the built command over live journal roots.
 //   - no --root fails nonzero naming the flag
-//   - the default scan of a rebuildable root exits 0, reports the dry run and writes no byte
-//   - --restore exits 0 and the restored root recalls the exact body
+//   - the scan of a root the event body answers exits 0, reports every reference answered and writes no byte
+//   - --restore is gone: the command refuses it by name, so no run of it writes a body
 //   - a truly lost reference exits nonzero and names the key with its owner on stdout
 //
 // 契约: docs/wiki/memory/memory-architecture.md#event-shape
-func TestRecoverKVCommandExitCodes(t *testing.T) {
+func TestVerifyKVCommandExitCodes(t *testing.T) {
 	ctx := context.Background()
-	binary := buildRecoverKV(t, ctx)
+	binary := buildVerifyKV(t, ctx)
 	const key = "1408-0000000000000000000000000000c0de"
-	const content = "the body the command rebuilds"
+	const content = "the body the command reads back"
 	owner := event.Address{AgentID: "agent-cli", SessionID: "session-cli"}
 	tier, root := seedRoot(t, ctx)
-	commitChainEvent(t, ctx, tier, chainEvent(key, content), 1)
-	commitPairs(t, ctx, tier, ledger.Pair{Key: "ref:" + key, Value: refJSON(t, []storedRefFixture{refFixture([]byte(content), owner)})})
+	commitFact(t, ctx, tier, chainEvent(key, content), content, 1)
 	lostTier, lostRoot := seedRoot(t, ctx)
 	lostKey := "1408-0000000000000000000000000000d00d"
-	commitPairs(t, ctx, lostTier, ledger.Pair{Key: "ref:" + lostKey, Value: refJSON(t, []storedRefFixture{refFixture([]byte("the body no chain event holds"), owner)})})
+	commitPairs(t, ctx, lostTier, ledger.Pair{Key: "ref:" + lostKey, Value: refJSON(t, []storedRefFixture{refFixture([]byte("the body no copy holds"), owner)})})
 	closeSeeded(t, tier)
 	closeSeeded(t, lostTier)
 
-	out, errOut, code := runRecoverKV(t, ctx, binary)
+	_, errOut, code := runVerifyKV(t, ctx, binary)
 	if code != 1 || !strings.Contains(errOut, "--root is required") {
 		t.Fatalf("the command without --root exited %d with stderr %q, want 1 naming the flag", code, errOut)
 	}
 	before := rootFiles(t, root)
-	out, _, code = runRecoverKV(t, ctx, binary, "--root", root)
-	if code != 0 || !strings.Contains(out, "1 recoverable") || !strings.Contains(out, "dry run") || !strings.Contains(out, key) {
-		t.Fatalf("the default scan exited %d with stdout %q, want 0 reporting the dry run of %s", code, out, key)
+	out, errOut, code := runVerifyKV(t, ctx, binary, "--root", root)
+	if code != 0 || !strings.Contains(out, "every reference is answered by the text it names") {
+		t.Fatalf("the scan exited %d with stdout %q and stderr %q, want 0 reporting every reference answered", code, out, errOut)
+	}
+	assertRootUnchanged(t, root, before)
+	_, errOut, code = runVerifyKV(t, ctx, binary, "--root", root, "--restore")
+	if code != 2 || !strings.Contains(errOut, "-restore") {
+		t.Fatalf("the removed --restore exited %d with stderr %q, want 2 naming the flag as undefined", code, errOut)
 	}
 	assertRootUnchanged(t, root, before)
 
-	out, _, code = runRecoverKV(t, ctx, binary, "--root", root, "--restore")
-	if code != 0 || !strings.Contains(out, "1 restored") {
-		t.Fatalf("the restore exited %d with stdout %q, want 0 reporting the one restored body", code, out)
-	}
-	if got := openRoot(t, ctx, root).Originals.Get(ctx, event.EventID(key)); got.Outcome != ledger.RecallFound || !bytes.Equal(got.Body, []byte(content)) {
-		t.Fatalf("the recall of the restored root = %+v, want the exact body %q", got, content)
-	}
-	out, _, code = runRecoverKV(t, ctx, binary, "--root", root)
-	if code != 0 || !strings.Contains(out, "nothing to recover") {
-		t.Fatalf("the rescan of the restored root exited %d with stdout %q, want 0 reporting nothing to recover", code, out)
-	}
-
 	lostBefore := rootFiles(t, lostRoot)
-	out, errOut, code = runRecoverKV(t, ctx, binary, "--root", lostRoot, "--restore")
+	out, errOut, code = runVerifyKV(t, ctx, binary, "--root", lostRoot)
 	if code != 1 {
-		t.Fatalf("the restore of a truly lost reference exited %d, want 1", code)
+		t.Fatalf("the scan of a truly lost reference exited %d, want 1", code)
 	}
 	for _, want := range []string{lostKey, string(owner.AgentID), string(owner.SessionID), "truly lost"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("the stdout %q does not name %q", out, want)
 		}
 	}
-	if !strings.Contains(errOut, "unable to boot") {
-		t.Fatalf("the stderr %q does not report the root as unable to boot", errOut)
+	if !strings.Contains(errOut, "unable to serve every original") {
+		t.Fatalf("the stderr %q does not report the root as unable to serve every original", errOut)
 	}
 	assertRootUnchanged(t, lostRoot, lostBefore)
 }
@@ -469,9 +751,9 @@ func chainEvent(key, content string) event.Event {
 	}
 }
 
-// commitChainEvent commits the encoded body of evt as one chain record of the
-// tier, at the sequence slot the case names.
-func commitChainEvent(t *testing.T, ctx context.Context, tier *ledger.Tier, evt event.Event, seq int64) {
+// chainRecord returns the segment record one event commits at the sequence slot the
+// case names: the encoded body of evt and the chain fields of its type and session.
+func chainRecord(t *testing.T, evt event.Event, seq int64) ledger.SegmentRecord {
 	t.Helper()
 	body, err := memory.BodyFromEvent(evt, "text/plain", "keep")
 	if err != nil {
@@ -482,16 +764,42 @@ func commitChainEvent(t *testing.T, ctx context.Context, tier *ledger.Tier, evt 
 		t.Fatalf("encode the body of %s: %v", evt.Key, err)
 	}
 	window := evt.Timestamp.UnixMilli()
-	err = tier.Segments.StoreEvent(ctx, ledger.SegmentRecord{
+	return ledger.SegmentRecord{
 		PartitionID: memory.PartitionIDFromName(string(evt.Owner.AgentID)),
 		WindowTS:    window,
 		Seq:         seq,
 		EventKey:    evt.Key,
 		EventTime:   window,
 		Body:        encoded,
-	}.WithChain(evt.Type, evt.Owner.SessionID))
-	if err != nil {
+	}.WithChain(evt.Type, evt.Owner.SessionID)
+}
+
+// commitChainEvent commits the record of evt as one chain record of the tier, at
+// the sequence slot the case names, staging no reference.
+func commitChainEvent(t *testing.T, ctx context.Context, tier *ledger.Tier, evt event.Event, seq int64) {
+	t.Helper()
+	if err := tier.Segments.StoreEvent(ctx, chainRecord(t, evt, seq)); err != nil {
 		t.Fatalf("commit the chain event %s: %v", evt.Key, err)
+	}
+}
+
+// commitFact commits evt and its reference through the whole-fact commit, which is
+// the write the runtime performs: the reference is staged alone and content lands
+// inside the event body.
+func commitFact(t *testing.T, ctx context.Context, tier *ledger.Tier, evt event.Event, content string, seq int64) {
+	t.Helper()
+	outcome, err := ledger.CommitFact(ctx, tier, ledger.FactCommit{
+		Record: chainRecord(t, evt, seq),
+		Ref: ledger.OriginalRef{
+			Key:             evt.Key,
+			Owner:           evt.Owner,
+			Format:          "text/plain",
+			RetentionPolicy: "keep",
+		},
+		Body: []byte(content),
+	})
+	if err != nil || outcome != ledger.FactCommitted {
+		t.Fatalf("commit the fact %s = %v, %v, want the committed outcome", evt.Key, outcome, err)
 	}
 }
 
@@ -544,13 +852,13 @@ func blobKeysOf(t *testing.T, ctx context.Context, root string) []string {
 	return keys
 }
 
-// assertBootRefuses reports the boot load of root as the named refusal of the
-// reference of key with no independent body.
-func assertBootRefuses(t *testing.T, ctx context.Context, root, key string) {
+// assertRecallRefuses reports the recall of root as the named refusal of the
+// reference of key that no copy of the root carries the text for.
+func assertRecallRefuses(t *testing.T, ctx context.Context, root, key string) {
 	t.Helper()
 	got := openRoot(t, ctx, root).Originals.Get(ctx, event.EventID(key))
 	if got.Outcome != ledger.RecallFailed || !errors.Is(got.Err, ledger.ErrSnapshotCorrupt) || !strings.Contains(got.Err.Error(), key) {
-		t.Fatalf("the boot load of %s = %+v, want the named refusal of the reference of %s with no body", root, got, key)
+		t.Fatalf("the recall of %s = %+v, want the named refusal of the reference of %s with no text", root, got, key)
 	}
 }
 
@@ -609,8 +917,8 @@ func assertRootUnchanged(t *testing.T, root string, before map[string][]byte) {
 	}
 }
 
-// orphanKeys returns the keys of one reported class in the order it holds them.
-func orphanKeys(list []orphan) []string {
+// referenceKeys returns the keys of one reported class in the order it holds them.
+func referenceKeys(list []reference) []string {
 	keys := make([]string, 0, len(list))
 	for _, item := range list {
 		keys = append(keys, item.Key)
@@ -622,13 +930,13 @@ func orphanKeys(list []orphan) []string {
 // files, which is where a case appends the torn frame a writer left.
 const kvDirectory = "kv"
 
-// TestRecoverScanStatesTheTornTailAndTheIndexItRead pins what a dry run states about a root whose log ends torn.
-//   - the scan completes and classifies the root's references instead of refusing the root
-//   - stdout names the torn tail the open found, the bytes the dry run left uncut and the whole log it replayed
+// TestVerifyScanStatesTheTornTailAndTheIndexItRead pins what the scan states about a root whose log ends torn.
+//   - the scan completes and verifies the root's references instead of refusing the root
+//   - stdout names the torn tail the open found, the bytes the scan left uncut and the whole log it replayed
 //   - the root keeps every file byte for byte
 //
 // 契约: docs/wiki/memory/memory-architecture.md#event-shape
-func TestRecoverScanStatesTheTornTailAndTheIndexItRead(t *testing.T) {
+func TestVerifyScanStatesTheTornTailAndTheIndexItRead(t *testing.T) {
 	ctx := context.Background()
 	const key = "1408-8d0c9b7a6f5e4d3c2b1a0918f7e6d5c4"
 	const content = "the body the chain still holds"
@@ -645,18 +953,18 @@ func TestRecoverScanStatesTheTornTailAndTheIndexItRead(t *testing.T) {
 	stateAnotherVersion(t, filepath.Join(kvDir, "slots"))
 	before := rootFiles(t, root)
 
-	binary := buildRecoverKV(t, ctx)
-	out, errOut, code := runRecoverKV(t, ctx, binary, "--root", root)
+	binary := buildVerifyKV(t, ctx)
+	out, errOut, code := runVerifyKV(t, ctx, binary, "--root", root)
 	if code != 0 {
-		t.Fatalf("the dry run of a root whose index states no watermark exited %d with stderr %q, want 0: the scan reads the log whole",
+		t.Fatalf("the scan of a root whose index states no watermark exited %d with stderr %q, want 0: the scan reads the log whole",
 			code, errOut)
 	}
 	for _, want := range []string{
 		"states no watermark this build reads",
 		"replayed the whole log",
 		"the log ends in a torn tail at " + strconv.FormatInt(torn, 10),
-		"and the dry run cut nothing",
-		"recoverable",
+		"and the scan cut nothing",
+		"every reference is answered by the text it names",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("the stdout %q does not name %q", out, want)
@@ -713,9 +1021,9 @@ func stateAnotherVersion(t *testing.T, path string) {
 	}
 }
 
-// buildRecoverKV builds the command into a temporary directory and returns its
+// buildVerifyKV builds the command into a temporary directory and returns its
 // path, so a case runs the flags and the exit status an operator meets.
-func buildRecoverKV(t *testing.T, ctx context.Context) string {
+func buildVerifyKV(t *testing.T, ctx context.Context) string {
 	t.Helper()
 	binary := filepath.Join(t.TempDir(), "recover-kv")
 	out, err := exec.CommandContext(ctx, "go", "build", "-o", binary, ".").CombinedOutput()
@@ -725,9 +1033,9 @@ func buildRecoverKV(t *testing.T, ctx context.Context) string {
 	return binary
 }
 
-// runRecoverKV runs the built command with args and returns its stdout, its
+// runVerifyKV runs the built command with args and returns its stdout, its
 // stderr and its exit status.
-func runRecoverKV(t *testing.T, ctx context.Context, binary string, args ...string) (string, string, int) {
+func runVerifyKV(t *testing.T, ctx context.Context, binary string, args ...string) (string, string, int) {
 	t.Helper()
 	cmd := exec.CommandContext(ctx, binary, args...)
 	var out, errOut bytes.Buffer

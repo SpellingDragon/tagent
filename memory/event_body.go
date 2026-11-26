@@ -14,8 +14,10 @@
 // across a restart keeps every field it committed with. One body format exists:
 // bytes an earlier writer committed under another identity field carry no
 // identity under this schema and are refused by name, because that state is
-// rebuilt cold instead of migrated. The original text behind the event stays in
-// the original store and is read byte for byte through the scoped path.
+// rebuilt cold instead of migrated. The original text behind the event is the
+// content of this body: the original store keeps the reference metadata beside it
+// and answers the scoped read out of these very bytes, so no copy of the text is
+// stored beside the event that already carries it.
 package memory
 
 import (

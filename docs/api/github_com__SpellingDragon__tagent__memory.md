@@ -19,14 +19,16 @@ The light fields a query filters and matches on are not stored beside those:
 the summary is read out of the metadata projection and the content out of the
 native payload when the record is built, so no field of a committed event
 is held twice and no second copy of it can drift from the event it names.
-A stored body is self-describing: it decodes back into the query record,
-the recall reference and the very event that committed, so a committed body
-becomes queryable and readable without a second registry and a fact restored
-across a restart keeps every field it committed with. One body format exists:
-bytes an earlier writer committed under another identity field carry no identity
-under this schema and are refused by name, because that state is rebuilt cold
-instead of migrated. The original text behind the event stays in the original
-store and is read byte for byte through the scoped path.
+A stored body is self-describing: it decodes back into the query record, the
+recall reference and the very event that committed, so a committed body becomes
+queryable and readable without a second registry and a fact restored across a
+restart keeps every field it committed with. One body format exists: bytes an
+earlier writer committed under another identity field carry no identity under
+this schema and are refused by name, because that state is rebuilt cold instead
+of migrated. The original text behind the event is the content of this body:
+the original store keeps the reference metadata beside it and answers the scoped
+read out of these very bytes, so no copy of the text is stored beside the event
+that already carries it.
 
 The identity to partition mapping of the memory side: one name resolves to one
 stable partition ID, so every writer and every authorized read scope that names

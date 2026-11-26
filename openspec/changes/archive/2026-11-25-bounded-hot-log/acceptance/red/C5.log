@@ -1,0 +1,12 @@
+command: go test -overlay=/tmp/tagent-bhl-f3-new/C5/overlay.json ./memory/ledger -count=1 -run '^TestArchiveManifestRefusesUnstatedNamedArtifact$' -v
+exit: 1
+=== RUN   TestArchiveManifestRefusesUnstatedNamedArtifact
+=== RUN   TestArchiveManifestRefusesUnstatedNamedArtifact/segment
+    archive_test.go:895: the unstated segment reads found=true err=<nil>, want ErrArchiveCorrupt
+=== RUN   TestArchiveManifestRefusesUnstatedNamedArtifact/index
+    archive_test.go:895: the unstated index reads found=true err=<nil>, want ErrArchiveCorrupt
+--- FAIL: TestArchiveManifestRefusesUnstatedNamedArtifact (0.31s)
+    --- FAIL: TestArchiveManifestRefusesUnstatedNamedArtifact/segment (0.16s)
+    --- FAIL: TestArchiveManifestRefusesUnstatedNamedArtifact/index (0.15s)
+FAIL
+FAIL	github.com/SpellingDragon/tagent/memory/ledger	0.525s

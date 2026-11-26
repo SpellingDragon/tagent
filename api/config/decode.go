@@ -275,7 +275,8 @@ func sectionFields(source, field string, e *sourceEntry, keys ...string) (map[st
 // memoryField maps one memory section mapping onto its declaration.
 func memoryField(source, field string, e *sourceEntry) (MemorySpec, error) {
 	spec := MemorySpec{}
-	fields, declared, err := sectionFields(source, field, e, "type", "path", "read_namespaces", "engine")
+	fields, declared, err := sectionFields(source, field, e, "type", "path", "read_namespaces", "engine",
+		"archive_root", "hot_log_max_bytes", "archive_max_age")
 	if err != nil || !declared {
 		return spec, err
 	}
@@ -289,6 +290,15 @@ func memoryField(source, field string, e *sourceEntry) (MemorySpec, error) {
 		return MemorySpec{}, err
 	}
 	if spec.Engine, err = engineField(source, joinField(field, "engine"), fields["engine"]); err != nil {
+		return MemorySpec{}, err
+	}
+	if spec.ArchiveRoot, err = stringField(source, joinField(field, "archive_root"), fields["archive_root"]); err != nil {
+		return MemorySpec{}, err
+	}
+	if spec.HotLogMaxBytes, err = countField(source, joinField(field, "hot_log_max_bytes"), fields["hot_log_max_bytes"]); err != nil {
+		return MemorySpec{}, err
+	}
+	if spec.ArchiveMaxAge, err = durationField(source, joinField(field, "archive_max_age"), fields["archive_max_age"]); err != nil {
 		return MemorySpec{}, err
 	}
 	return spec, nil

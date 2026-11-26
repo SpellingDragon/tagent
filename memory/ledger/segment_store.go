@@ -908,23 +908,42 @@ func (s *FileSegmentStore) GetEventInPartition(ctx context.Context, key event.Ev
 }
 
 // duplicateBodyLocked answers the committed body of one indexed event for a
-// duplicate commit check: the cache first, then the persisted entry. The caller
-// holds the lock.
+// duplicate commit check: the hot cache first, then the persisted entry. The
+// caller holds the lock.
 func (s *FileSegmentStore) duplicateBodyLocked(ctx context.Context, key event.EventID, position indexPosition) ([]byte, bool, error) {
-	if cached, held := s.cache.get(key); held {
-		return append([]byte(nil), cached.Body...), true, nil
+	if !s.readsFromArchive(position) {
+		if cached, held := s.cache.get(key); held {
+			return append([]byte(nil), cached.Body...), true, nil
+		}
 	}
 	return s.readBodyLocked(ctx, position)
+}
+
+// archiveReadSource reports whether one persisted key's hot slot is empty beside
+// an archive declaration, so archived bodies never enter the segment read cache.
+type archiveReadSource interface {
+	readsFromArchive(key string) bool
+}
+
+// readsFromArchive reports whether the persisted body at position comes from the
+// archive rather than a hot journal slot.
+func (s *FileSegmentStore) readsFromArchive(position indexPosition) bool {
+	source, ok := s.kv.(archiveReadSource)
+	return ok && source.readsFromArchive(segmentBodyKey(position))
 }
 
 // storedAtLocked answers one event at a position the caller already resolved: the
 // body from the read cache, or the persisted entry the position names. An index
 // entry whose body cannot be read reports ErrSegmentBodyMissing, so a record the
-// index names is never published as an absent one. The caller holds the lock.
+// index names is never published as an absent one. Archive-sourced bodies bypass
+// the cache on both hit and fill. The caller holds the lock.
 func (s *FileSegmentStore) storedAtLocked(ctx context.Context, key event.EventID, position indexPosition) (StoredEvent, bool, error) {
-	if cached, held := s.cache.get(key); held {
-		cached.Body = append([]byte(nil), cached.Body...)
-		return cached, true, nil
+	fromArchive := s.readsFromArchive(position)
+	if !fromArchive {
+		if cached, held := s.cache.get(key); held {
+			cached.Body = append([]byte(nil), cached.Body...)
+			return cached, true, nil
+		}
 	}
 	body, found, err := s.readBodyLocked(ctx, position)
 	if err != nil {
@@ -940,7 +959,9 @@ func (s *FileSegmentStore) storedAtLocked(ctx context.Context, key event.EventID
 		Seq:         position.seq,
 		Body:        body,
 	}
-	s.cache.put(stored)
+	if !fromArchive {
+		s.cache.put(stored)
+	}
 	return stored, true, nil
 }
 
@@ -950,9 +971,14 @@ func (s *FileSegmentStore) readBodyLocked(ctx context.Context, position indexPos
 	return readBodyAt(ctx, s.kv, position)
 }
 
+// segmentBodyKey names the persisted body of one indexed event.
+func segmentBodyKey(position indexPosition) string {
+	return fmt.Sprintf("%d:evt:%d:%d", position.partition, position.window, position.seq)
+}
+
 // readBodyAt reads the persisted body of one indexed event from kv.
 func readBodyAt(ctx context.Context, kv AtomicStore, position indexPosition) ([]byte, bool, error) {
-	pairs, err := kv.Read(ctx, Fetch{Key: fmt.Sprintf("%d:evt:%d:%d", position.partition, position.window, position.seq)})
+	pairs, err := kv.Read(ctx, Fetch{Key: segmentBodyKey(position)})
 	if err != nil {
 		return nil, false, err
 	}
@@ -1173,20 +1199,42 @@ func (s *FileSegmentStore) EachIndexNewestFirst(ctx context.Context, visit func(
 	})
 }
 
-// EachIndexNewestFirstFrom streams the index from the entry of one key onwards in the order EachIndexNewestFirstUntil states.
-//   - a caller that already knows the key it is looking for pays its own commit and the ones behind it instead of every commit filed after it
-//   - the walk starts where the engine's order-line index states the commit that last stated the key ended, which costs one probe of the identity index and one read of that index
-//   - so the walk costs the history committed after the key nothing
-//   - the seek is answered only once the walk names the key it was read for, because one order line states every key of its commit: a walk that ends without naming that key discards the seek and walks the index from the newest entry, so a word stating some other byte costs the walk its seek and never its answer
-//   - an engine that states no such index, a key this store holds no published entry of, and an entry the engine names no commit for all walk the index from the newest entry
-//   - so a seek that cannot be placed costs the walk it always took and never an entry it skipped
+// EachIndexNewestFirstFrom streams the full index from one key's commit.
+//   - The seek costs the key's commit and older records, not commits filed after it.
+//   - An unplaceable seek falls back to the full newest-first walk.
 func (s *FileSegmentStore) EachIndexNewestFirstFrom(ctx context.Context, from event.EventID, visit func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) (bool, error)) error {
+	return s.eachIndexNewestFirstFrom(ctx, from, visit, false)
+}
+
+// EachIndexNewestFirstFromHot streams only the hot index from one key's commit.
+//   - Point lookups keep their bounded hot walk before falling back to identity reads.
+func (s *FileSegmentStore) EachIndexNewestFirstFromHot(ctx context.Context, from event.EventID, visit func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) (bool, error)) error {
+	return s.eachIndexNewestFirstFrom(ctx, from, visit, true)
+}
+
+func (s *FileSegmentStore) eachIndexNewestFirstFrom(ctx context.Context, from event.EventID, visit func(key event.EventID, partition int, seq int64, typ string, session event.SessionID) (bool, error), hotOnly bool) error {
 	entryVisit := func(key event.EventID, position indexPosition) (bool, error) {
 		return visit(key, position.partition, position.seq, position.typ, position.session)
 	}
-	seek, holds := s.kv.(commitOrderSeek)
-	if !holds {
-		return s.eachIndexEntryNewestFirst(ctx, entryVisit)
+	var seek commitOrderSeek
+	var walk func(context.Context, int64, func(string, []byte) (bool, error)) error
+	if hotOnly {
+		hot, holds := s.kv.(interface {
+			commitOrderSeek
+			EachHotCommittedNewestFirstFrom(context.Context, int64, func(string, []byte) (bool, error)) error
+		})
+		if !holds {
+			return s.eachIndexEntryNewestFirst(ctx, entryVisit)
+		}
+		seek = hot
+		walk = hot.EachHotCommittedNewestFirstFrom
+	} else {
+		ordered, holds := s.kv.(commitOrderSeek)
+		if !holds {
+			return s.eachIndexEntryNewestFirst(ctx, entryVisit)
+		}
+		seek = ordered
+		walk = ordered.EachCommittedNewestFirstFrom
 	}
 	lineEnd, named, err := s.indexEntrySeek(ctx, seek, from)
 	if err != nil {
@@ -1203,7 +1251,7 @@ func (s *FileSegmentStore) EachIndexNewestFirstFrom(ctx context.Context, from ev
 		return entryVisit(key, position)
 	}
 	if err := s.walkIndexValues(namingVisit, func(step func(rawKey string, value []byte) (bool, error)) error {
-		return seek.EachCommittedNewestFirstFrom(ctx, lineEnd, step)
+		return walk(ctx, lineEnd, step)
 	}); err != nil {
 		return err
 	}
